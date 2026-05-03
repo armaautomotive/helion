@@ -1,6 +1,7 @@
 package helion;
 
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -50,7 +51,12 @@ public class OpenAiCompatibleProvider implements LlmProvider {
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (ConnectException ex) {
+            throw new IOException(providerName + " endpoint unavailable: " + endpoint, ex);
+        }
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IOException(providerName + " API error: HTTP " + response.statusCode() + " " + response.body());
         }

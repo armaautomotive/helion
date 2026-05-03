@@ -1,7 +1,9 @@
 # Social Media Agent Status
 
-Execution state: paused
+Run state: paused
+Execution target: cloud
 Run interval seconds: 600
+Primary output file: workspace/opportunities.md
 
 Current objective:
 - Prepare for monitoring relevant community discussions and identifying helpful engagement opportunities.

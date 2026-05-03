@@ -4,7 +4,7 @@ import java.time.LocalDateTime;
 
 public record AgentRuntime(
         String agentId,
-        String executionState,
+        String executionTarget,
         String runtimeState,
         String currentTask,
         LocalDateTime lastTaskStartedAt,
@@ -19,10 +19,10 @@ public record AgentRuntime(
         long averageCycleSeconds,
         String lastErrorMessage) {
 
-    public static AgentRuntime initial(String agentId, String executionState) {
+    public static AgentRuntime initial(String agentId, String executionTarget) {
         return new AgentRuntime(
                 agentId,
-                executionState,
+                executionTarget,
                 "idle",
                 "",
                 null,
@@ -38,10 +38,10 @@ public record AgentRuntime(
                 "");
     }
 
-    public AgentRuntime start(String executionState, String task, LocalDateTime startedAt) {
+    public AgentRuntime start(String executionTarget, String task, LocalDateTime startedAt) {
         return new AgentRuntime(
                 agentId,
-                executionState,
+                executionTarget,
                 "running",
                 task,
                 startedAt,
@@ -57,12 +57,12 @@ public record AgentRuntime(
                 "");
     }
 
-    public AgentRuntime success(String executionState, String task, LocalDateTime startedAt, LocalDateTime finishedAt, String summary, String outputPath) {
+    public AgentRuntime success(String executionTarget, String task, LocalDateTime startedAt, LocalDateTime finishedAt, String summary, String outputPath) {
         long cycleSeconds = startedAt == null ? 0 : java.time.Duration.between(startedAt, finishedAt).getSeconds();
         long average = totalSuccesses <= 0 ? cycleSeconds : Math.round(((double) (averageCycleSeconds * totalSuccesses) + cycleSeconds) / (totalSuccesses + 1));
         return new AgentRuntime(
                 agentId,
-                executionState,
+                executionTarget,
                 "idle",
                 task,
                 startedAt,
@@ -78,12 +78,12 @@ public record AgentRuntime(
                 "");
     }
 
-    public AgentRuntime failure(String executionState, String task, LocalDateTime startedAt, LocalDateTime finishedAt, String errorMessage) {
+    public AgentRuntime failure(String executionTarget, String task, LocalDateTime startedAt, LocalDateTime finishedAt, String errorMessage) {
         long cycleSeconds = startedAt == null ? 0 : java.time.Duration.between(startedAt, finishedAt).getSeconds();
         long average = averageCycleSeconds <= 0 ? cycleSeconds : averageCycleSeconds;
         return new AgentRuntime(
                 agentId,
-                executionState,
+                executionTarget,
                 "error",
                 task,
                 startedAt,
@@ -102,7 +102,7 @@ public record AgentRuntime(
     public String toJson() {
         return "{"
                 + "\"agentId\":\"" + TextUtils.escapeJson(agentId) + "\","
-                + "\"executionState\":\"" + TextUtils.escapeJson(executionState) + "\","
+                + "\"executionTarget\":\"" + TextUtils.escapeJson(executionTarget) + "\","
                 + "\"runtimeState\":\"" + TextUtils.escapeJson(runtimeState) + "\","
                 + "\"currentTask\":\"" + TextUtils.escapeJson(currentTask) + "\","
                 + "\"lastTaskStartedAt\":\"" + TextUtils.escapeJson(format(lastTaskStartedAt)) + "\","

@@ -8,21 +8,78 @@ public final class TextUtils {
     }
 
     public static String escapeJson(String value) {
-        return value
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(value.length() + 16);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '\\' -> out.append("\\\\");
+                case '"' -> out.append("\\\"");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                case '\b' -> out.append("\\b");
+                case '\f' -> out.append("\\f");
+                default -> {
+                    if (c < 0x20) {
+                        appendUnicodeEscape(out, c);
+                    } else {
+                        out.append(c);
+                    }
+                }
+            }
+        }
+        return out.toString();
     }
 
     public static String unescapeJson(String value) {
-        return value
-                .replace("\\n", "\n")
-                .replace("\\r", "\r")
-                .replace("\\t", "\t")
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\");
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(value.length());
+        boolean escaping = false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (!escaping) {
+                if (c == '\\') {
+                    escaping = true;
+                } else {
+                    out.append(c);
+                }
+                continue;
+            }
+            switch (c) {
+                case 'n' -> out.append('\n');
+                case 'r' -> out.append('\r');
+                case 't' -> out.append('\t');
+                case '"' -> out.append('"');
+                case '\\' -> out.append('\\');
+                case '/' -> out.append('/');
+                case 'b' -> out.append('\b');
+                case 'f' -> out.append('\f');
+                case 'u' -> {
+                    if (i + 4 < value.length()) {
+                        String hex = value.substring(i + 1, i + 5);
+                        try {
+                            out.append((char) Integer.parseInt(hex, 16));
+                            i += 4;
+                        } catch (NumberFormatException ignored) {
+                            out.append('u');
+                        }
+                    } else {
+                        out.append('u');
+                    }
+                }
+                default -> out.append(c);
+            }
+            escaping = false;
+        }
+        if (escaping) {
+            out.append('\\');
+        }
+        return out.toString();
     }
 
     public static String stripHtml(String value) {
@@ -69,6 +126,19 @@ public final class TextUtils {
                     case '/' -> out.append('/');
                     case 'b' -> out.append('\b');
                     case 'f' -> out.append('\f');
+                    case 'u' -> {
+                        if (i + 4 < text.length()) {
+                            String hex = text.substring(i + 1, i + 5);
+                            try {
+                                out.append((char) Integer.parseInt(hex, 16));
+                                i += 4;
+                            } catch (NumberFormatException ignored) {
+                                out.append('u');
+                            }
+                        } else {
+                            out.append('u');
+                        }
+                    }
                     default -> out.append(c);
                 }
                 escaping = false;
@@ -84,6 +154,15 @@ public final class TextUtils {
             out.append(c);
         }
         return out.toString();
+    }
+
+    private static void appendUnicodeEscape(StringBuilder out, char c) {
+        out.append("\\u");
+        String hex = Integer.toHexString(c);
+        for (int i = hex.length(); i < 4; i++) {
+            out.append('0');
+        }
+        out.append(hex);
     }
 
     private static String removeTagBlock(String value, String tagName) {

@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -33,7 +34,7 @@ public final class ProspectSearchQueueStore {
                 1,
                 "active",
                 null,
-                LocalDate.now(),
+                LocalDateTime.now(),
                 0,
                 notes);
         Files.writeString(file, item.toCsvRow() + "\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND);
@@ -63,8 +64,8 @@ public final class ProspectSearchQueueStore {
                     columns.get(4),
                     parseInt(columns.get(5), 1),
                     columns.get(6),
-                    parseDate(columns.get(7)),
-                    parseDate(columns.get(8)),
+                    parseLastRun(columns.get(7)),
+                    parseNextRun(columns.get(8), columns.get(6)),
                     parseInt(columns.get(9), 0),
                     columns.get(10)));
         }
@@ -73,13 +74,18 @@ public final class ProspectSearchQueueStore {
     }
 
     public ProspectSearchQueueItem nextDue(String agentId) throws IOException {
-        LocalDate today = LocalDate.now();
+        List<ProspectSearchQueueItem> due = dueItems(agentId, 1);
+        return due.isEmpty() ? null : due.get(0);
+    }
+
+    public List<ProspectSearchQueueItem> dueItems(String agentId, int limit) throws IOException {
+        LocalDateTime now = LocalDateTime.now();
         return list(agentId).stream()
-                .filter(item -> item.isDue(today))
-                .sorted(Comparator.comparing((ProspectSearchQueueItem item) -> item.nextRun() == null ? LocalDate.MIN : item.nextRun())
+                .filter(item -> item.isDue(now))
+                .sorted(Comparator.comparing((ProspectSearchQueueItem item) -> item.nextRun() == null ? LocalDateTime.MIN : item.nextRun())
                         .thenComparingInt(ProspectSearchQueueItem::id))
-                .findFirst()
-                .orElse(null);
+                .limit(Math.max(1, limit))
+                .toList();
     }
 
     public void markRun(String agentId, ProspectSearchQueueItem updated) throws IOException {
@@ -135,15 +141,35 @@ public final class ProspectSearchQueueStore {
         }
     }
 
-    private static LocalDate parseDate(String value) {
+    private static LocalDateTime parseLastRun(String value) {
+        return parseDateTime(value, false);
+    }
+
+    private static LocalDateTime parseNextRun(String value, String status) {
+        return parseDateTime(value, isLegacyActiveStatus(status));
+    }
+
+    private static LocalDateTime parseDateTime(String value, boolean forceDueForLegacyDate) {
         if (value == null || value.isBlank()) {
             return null;
         }
         try {
-            return LocalDate.parse(value.trim());
+            String text = value.trim();
+            if (text.contains("T")) {
+                return LocalDateTime.parse(text);
+            }
+            LocalDate date = LocalDate.parse(text);
+            if (forceDueForLegacyDate) {
+                return LocalDateTime.MIN;
+            }
+            return date.atStartOfDay();
         } catch (Exception ex) {
             return null;
         }
+    }
+
+    private static boolean isLegacyActiveStatus(String status) {
+        return status != null && status.equalsIgnoreCase("active");
     }
 
     private static List<String> parseCsvLine(String line) {

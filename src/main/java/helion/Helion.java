@@ -268,7 +268,7 @@ public final class Helion {
             status = java.nio.file.Files.readString(profile.statusFile()).trim();
         }
         AgentStatus parsedStatus = AgentStatus.parse(status, config);
-        AgentRuntime runtime = new AgentRuntimeStore().read(profile, parsedStatus.executionState());
+        AgentRuntime runtime = new AgentRuntimeStore().read(profile, parsedStatus.executionTarget());
         System.out.println(Ansi.bold("Agent: ") + profile.id());
         System.out.println(parsedStatus.renderedStatus());
         System.out.println();

@@ -8,18 +8,18 @@ import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 
 public final class AgentRuntimeStore {
-    public AgentRuntime read(AgentProfile profile, String executionState) throws IOException {
+    public AgentRuntime read(AgentProfile profile, String executionTarget) throws IOException {
         if (profile == null) {
             throw new IllegalArgumentException("Profile is required.");
         }
         Path file = profile.runtimeFile();
         if (file == null || !Files.exists(file)) {
-            return AgentRuntime.initial(profile.id(), executionState);
+            return AgentRuntime.initial(profile.id(), executionTarget);
         }
         String json = Files.readString(file, StandardCharsets.UTF_8);
         return new AgentRuntime(
                 profile.id(),
-                readString(json, "executionState", executionState),
+                readString(json, "executionTarget", executionTarget),
                 readString(json, "runtimeState", "idle"),
                 readString(json, "currentTask", ""),
                 readDateTime(json, "lastTaskStartedAt"),

@@ -49,6 +49,7 @@ public final class AgentRegistry {
                 dir.resolve("distill.md"),
                 dir.resolve("status.md"),
                 dir.resolve("runtime.json"),
+                dir.resolve("activity.jsonl"),
                 dir.resolve("distilled"),
                 dir.resolve("workspace"));
     }

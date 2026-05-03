@@ -76,7 +76,7 @@ public final class ProviderFactory {
     }
 
     public static EmailDraftStore createEmailDraftStore(HelionConfig config) {
-        return new EmailDraftStore(config.emailSettings(), createAgentRegistry(config));
+        return new EmailDraftStore(config.emailSettings(), createAgentRegistry(config), config);
     }
 
     public static UsageTracker createUsageTracker(HelionConfig config) {

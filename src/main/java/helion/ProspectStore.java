@@ -17,9 +17,11 @@ public final class ProspectStore {
     private static final String CSV_HEADER = "company,website,contact_name,contact_role,contact_email,phone,location,industry,fit_score,status,priority,owner,discovered_at,last_updated,tags,why_fit,evidence,source_urls,next_action\n";
     private static final String LEGACY_CSV_HEADER = "company,website,contact_name,contact_role,contact_email,location,industry,fit_score,why_fit,evidence,source_urls,next_action";
     private final AgentRegistry agentRegistry;
+    private final HelionConfig config;
 
-    public ProspectStore(AgentRegistry agentRegistry) {
+    public ProspectStore(AgentRegistry agentRegistry, HelionConfig config) {
         this.agentRegistry = agentRegistry;
+        this.config = config;
     }
 
     public String save(String agentId, String searchFocus, List<ProspectRecord> records) throws IOException {
@@ -31,8 +33,11 @@ public final class ProspectStore {
             throw new IllegalArgumentException("No prospects to save.");
         }
         Files.createDirectories(profile.workspaceDir());
-        Path markdownFile = profile.workspaceDir().resolve("prospects.md");
+        Path markdownFile = AgentOutputResolver.resolvePrimaryOutputFile(profile, config, "workspace/prospects.md");
         Path csvFile = profile.workspaceDir().resolve("prospects.csv");
+        if (markdownFile.getParent() != null) {
+            Files.createDirectories(markdownFile.getParent());
+        }
 
         if (!Files.exists(markdownFile)) {
             Files.writeString(markdownFile, "# Prospect List\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE);

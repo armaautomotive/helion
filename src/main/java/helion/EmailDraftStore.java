@@ -13,10 +13,12 @@ public final class EmailDraftStore {
 
     private final EmailSettings settings;
     private final AgentRegistry agentRegistry;
+    private final HelionConfig config;
 
-    public EmailDraftStore(EmailSettings settings, AgentRegistry agentRegistry) {
+    public EmailDraftStore(EmailSettings settings, AgentRegistry agentRegistry, HelionConfig config) {
         this.settings = settings;
         this.agentRegistry = agentRegistry;
+        this.config = config;
     }
 
     public boolean isEnabled() {
@@ -32,8 +34,11 @@ public final class EmailDraftStore {
         if (profile == null) {
             throw new IllegalArgumentException("Unknown agent: " + agentId);
         }
-        Path draftsFile = profile.workspaceDir().resolve("reply_drafts.md");
+        Path draftsFile = AgentOutputResolver.resolvePrimaryOutputFile(profile, config, "workspace/reply_drafts.md");
         Files.createDirectories(profile.workspaceDir());
+        if (draftsFile.getParent() != null) {
+            Files.createDirectories(draftsFile.getParent());
+        }
         if (!Files.exists(draftsFile)) {
             Files.writeString(draftsFile, "# Reply Drafts\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE);
         }

@@ -69,11 +69,12 @@ public final class HelionWebServer {
                         ? AgentStatus.parse("", config)
                         : AgentStatus.parse(readIfExists(profile.statusFile()), config);
                 AgentRuntime runtime = profile == null
-                        ? AgentRuntime.initial(ids.get(i), status.executionState())
-                        : new AgentRuntimeStore().read(profile, status.executionState());
+                        ? AgentRuntime.initial(ids.get(i), status.executionTarget())
+                        : new AgentRuntimeStore().read(profile, status.executionTarget());
                 json.append("{")
                         .append("\"id\":\"").append(TextUtils.escapeJson(ids.get(i))).append("\",")
-                        .append("\"executionState\":\"").append(TextUtils.escapeJson(status.executionState())).append("\",")
+                        .append("\"runState\":\"").append(TextUtils.escapeJson(status.runState())).append("\",")
+                        .append("\"executionTarget\":\"").append(TextUtils.escapeJson(status.executionTarget())).append("\",")
                         .append("\"runtimeState\":\"").append(TextUtils.escapeJson(runtime.runtimeState())).append("\",")
                         .append("\"consecutiveFailures\":").append(runtime.consecutiveFailures()).append(',')
                         .append("\"totalSuccesses\":").append(runtime.totalSuccesses()).append(',')
@@ -87,10 +88,13 @@ public final class HelionWebServer {
         server.createContext("/api/agent", new AgentHandler());
         server.createContext("/api/agent-settings", new AgentSettingsHandler());
         server.createContext("/api/agent-file", new AgentFileHandler());
+        server.createContext("/api/activity", new ActivityHandler());
+        server.createContext("/api/output", new OutputHandler());
         server.createContext("/api/distilled", new DistilledFilesHandler());
         server.createContext("/api/distilled/file", new DistilledFileHandler());
         server.createContext("/api/company-sources", new CompanySourcesHandler());
         server.createContext("/api/usage", new UsageHandler());
+        server.createContext("/api/usage-series", new UsageSeriesHandler());
         server.createContext("/api/respond", new RespondHandler());
     }
 
@@ -112,7 +116,7 @@ public final class HelionWebServer {
             String role = readIfExists(profile.roleFile());
             String distill = readIfExists(profile.distillFile());
             AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
-            AgentRuntime runtime = new AgentRuntimeStore().read(profile, status.executionState());
+            AgentRuntime runtime = new AgentRuntimeStore().read(profile, status.executionTarget());
             String distilled = new DirectoryCorpus(true, profile.distilledDir(), 8000, 3).loadContext();
             String workspace = new DirectoryCorpus(true, profile.workspaceDir(), 8000, 3).loadContext();
 
@@ -121,7 +125,9 @@ public final class HelionWebServer {
                     + "\"role\":\"" + TextUtils.escapeJson(role) + "\","
                     + "\"distill\":\"" + TextUtils.escapeJson(distill) + "\","
                     + "\"status\":\"" + TextUtils.escapeJson(status.renderedStatus()) + "\","
-                    + "\"executionState\":\"" + TextUtils.escapeJson(status.executionState()) + "\","
+                    + "\"runState\":\"" + TextUtils.escapeJson(status.runState()) + "\","
+                    + "\"executionTarget\":\"" + TextUtils.escapeJson(status.executionTarget()) + "\","
+                    + "\"primaryOutputFile\":\"" + TextUtils.escapeJson(status.primaryOutputFile()) + "\","
                     + "\"runtime\":\"" + TextUtils.escapeJson(runtime.render()) + "\","
                     + "\"distilled\":\"" + TextUtils.escapeJson(distilled) + "\","
                     + "\"workspace\":\"" + TextUtils.escapeJson(workspace) + "\""
@@ -186,16 +192,114 @@ public final class HelionWebServer {
                 return;
             }
             Map<String, String> body = parseJsonObject(readBody(exchange));
-            String executionState = body.getOrDefault("executionState", "").trim();
+            String runState = body.getOrDefault("runState", "").trim();
+            String executionTarget = body.getOrDefault("executionTarget", "").trim();
             int runIntervalSeconds = parsePositiveInt(body.getOrDefault("runIntervalSeconds", ""), 300);
-            new AgentStatusStore(config).updateSettings(profile, executionState, runIntervalSeconds);
+            String primaryOutputFile = body.getOrDefault("primaryOutputFile", "").trim();
+            new AgentStatusStore(config).updateSettings(profile, runState, executionTarget, runIntervalSeconds, primaryOutputFile);
             AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
             String json = "{"
                     + "\"saved\":true,"
-                    + "\"executionState\":\"" + TextUtils.escapeJson(status.executionState()) + "\","
+                    + "\"runState\":\"" + TextUtils.escapeJson(status.runState()) + "\","
+                    + "\"executionTarget\":\"" + TextUtils.escapeJson(status.executionTarget()) + "\","
+                    + "\"primaryOutputFile\":\"" + TextUtils.escapeJson(status.primaryOutputFile()) + "\","
                     + "\"runIntervalSeconds\":" + status.runIntervalSeconds()
                     + "}";
             sendJson(exchange, 200, json);
+        }
+    }
+
+    private final class ActivityHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendMethodNotAllowed(exchange);
+                return;
+            }
+            AgentProfile profile = requireAgent(exchange);
+            if (profile == null) {
+                return;
+            }
+            List<AgentActivityEntry> entries = new AgentActivityStore().list(profile, 100);
+            StringBuilder json = new StringBuilder();
+            json.append("{\"entries\":[");
+            for (int i = 0; i < entries.size(); i++) {
+                AgentActivityEntry entry = entries.get(i);
+                if (i > 0) {
+                    json.append(',');
+                }
+                json.append("{")
+                        .append("\"timestamp\":\"").append(TextUtils.escapeJson(entry.timestamp() == null ? "" : entry.timestamp().toString())).append("\",")
+                        .append("\"level\":\"").append(TextUtils.escapeJson(entry.level())).append("\",")
+                        .append("\"task\":\"").append(TextUtils.escapeJson(entry.task())).append("\",")
+                        .append("\"summary\":\"").append(TextUtils.escapeJson(entry.summary())).append("\",")
+                        .append("\"details\":\"").append(TextUtils.escapeJson(entry.details())).append("\"")
+                        .append("}");
+            }
+            json.append("]}");
+            sendJson(exchange, 200, json.toString());
+        }
+    }
+
+    private final class OutputHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            AgentProfile profile = requireAgent(exchange);
+            if (profile == null) {
+                return;
+            }
+            Map<String, String> query = parseQuery(exchange.getRequestURI());
+            AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+            String primaryOutputFile = status.primaryOutputFile();
+            Files.createDirectories(profile.workspaceDir());
+            List<Path> files = listWorkspaceFiles(profile.workspaceDir());
+            String selectedPath = normalizeWorkspacePath(query.getOrDefault("path", ""));
+            if (selectedPath.isBlank()) {
+                selectedPath = primaryOutputFile;
+            }
+            if (selectedPath.isBlank() && !files.isEmpty()) {
+                selectedPath = AgentOutputResolver.relativeWorkspacePath(profile.workspaceDir(), files.get(0));
+            }
+            Path path = selectedPath.isBlank() ? null : resolveWorkspaceFile(profile, selectedPath);
+            String method = exchange.getRequestMethod().toUpperCase();
+            if ("GET".equals(method)) {
+                String content = path == null ? "" : readIfExists(path);
+                StringBuilder json = new StringBuilder();
+                json.append("{")
+                        .append("\"primaryPath\":\"").append(TextUtils.escapeJson(primaryOutputFile)).append("\",")
+                        .append("\"selectedPath\":\"").append(TextUtils.escapeJson(selectedPath)).append("\",")
+                        .append("\"content\":\"").append(TextUtils.escapeJson(content)).append("\",")
+                        .append("\"files\":[");
+                for (int i = 0; i < files.size(); i++) {
+                    if (i > 0) {
+                        json.append(',');
+                    }
+                    String relative = AgentOutputResolver.relativeWorkspacePath(profile.workspaceDir(), files.get(i));
+                    json.append("{")
+                            .append("\"path\":\"").append(TextUtils.escapeJson(relative)).append("\",")
+                            .append("\"primary\":").append(Boolean.toString(relative.equals(primaryOutputFile)))
+                            .append("}");
+                }
+                json.append("]}");
+                sendJson(exchange, 200, json.toString());
+                return;
+            }
+            if ("PUT".equals(method)) {
+                if (path == null) {
+                    sendJson(exchange, 400, "{\"error\":\"No output file selected\"}");
+                    return;
+                }
+                Map<String, String> body = parseJsonObject(readBody(exchange));
+                String content = body.getOrDefault("content", "");
+                writeTextFile(path, content);
+                String json = "{"
+                        + "\"path\":\"" + TextUtils.escapeJson(selectedPath) + "\","
+                        + "\"saved\":true"
+                        + "}";
+                sendJson(exchange, 200, json);
+                return;
+            }
+            sendMethodNotAllowed(exchange);
         }
     }
 
@@ -329,7 +433,7 @@ public final class HelionWebServer {
             }
 
             try {
-                String response = agent.respond(new AgentRequest(mode, prompt, agentId));
+                String response = agent.respondPlain(new AgentRequest(mode, prompt, agentId));
                 String json = "{\"response\":\"" + TextUtils.escapeJson(response) + "\"}";
                 sendJson(exchange, 200, json);
             } catch (Exception ex) {
@@ -346,7 +450,8 @@ public final class HelionWebServer {
                 sendMethodNotAllowed(exchange);
                 return;
             }
-            List<UsageSummary> summaries = ProviderFactory.createUsageTracker(config).summarize();
+            String agentId = parseQuery(exchange.getRequestURI()).getOrDefault("agentId", "").trim();
+            List<UsageSummary> summaries = ProviderFactory.createUsageTracker(config).summarize(agentId);
             StringBuilder json = new StringBuilder();
             json.append("{\"usage\":[");
             for (int i = 0; i < summaries.size(); i++) {
@@ -369,6 +474,27 @@ public final class HelionWebServer {
         }
     }
 
+    private final class UsageSeriesHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendMethodNotAllowed(exchange);
+                return;
+            }
+            String agentId = parseQuery(exchange.getRequestURI()).getOrDefault("agentId", "").trim();
+            UsageTracker tracker = ProviderFactory.createUsageTracker(config);
+            List<UsagePoint> hourly = tracker.hourlySeriesLast24Hours(agentId);
+            List<UsagePoint> daily = tracker.dailySeriesLast30Days(agentId);
+            StringBuilder json = new StringBuilder();
+            json.append("{\"hourly\":[");
+            appendUsagePoints(json, hourly);
+            json.append("],\"daily\":[");
+            appendUsagePoints(json, daily);
+            json.append("]}");
+            sendJson(exchange, 200, json.toString());
+        }
+    }
+
     private String renderCompanySourcesJson() throws IOException {
         List<Path> paths = companyDataSources.list();
         StringBuilder json = new StringBuilder();
@@ -382,6 +508,20 @@ public final class HelionWebServer {
         }
         json.append("]}");
         return json.toString();
+    }
+
+    private static void appendUsagePoints(StringBuilder json, List<UsagePoint> points) {
+        for (int i = 0; i < points.size(); i++) {
+            UsagePoint point = points.get(i);
+            if (i > 0) {
+                json.append(',');
+            }
+            json.append('{')
+                    .append("\"label\":\"").append(TextUtils.escapeJson(point.label())).append("\",")
+                    .append("\"totalTokens\":").append(point.totalTokens()).append(',')
+                    .append("\"requests\":").append(point.requests())
+                    .append('}');
+        }
     }
 
     private static String readIfExists(Path path) throws IOException {
@@ -406,6 +546,25 @@ public final class HelionWebServer {
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE);
+    }
+
+    private static Path resolveWorkspaceFile(AgentProfile profile, String outputFile) {
+        String normalized = outputFile == null ? "" : outputFile.trim().replace('\\', '/');
+        if (normalized.startsWith("workspace/")) {
+            normalized = normalized.substring("workspace/".length());
+        }
+        return profile.workspaceDir().resolve(normalized);
+    }
+
+    private static String normalizeWorkspacePath(String outputFile) {
+        String normalized = outputFile == null ? "" : outputFile.trim().replace('\\', '/');
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        if (!normalized.isBlank() && !normalized.startsWith("workspace/")) {
+            normalized = "workspace/" + normalized;
+        }
+        return normalized;
     }
 
     private static String readBody(HttpExchange exchange) throws IOException {
@@ -553,6 +712,21 @@ public final class HelionWebServer {
         send(exchange, status, "application/json; charset=utf-8", json);
     }
 
+    private static List<Path> listWorkspaceFiles(Path dir) throws IOException {
+        if (dir == null) {
+            return List.of();
+        }
+        Files.createDirectories(dir);
+        List<Path> files = new ArrayList<>();
+        try (var stream = Files.walk(dir, 4)) {
+            stream.filter(Files::isRegularFile)
+                    .filter(path -> !path.getFileName().toString().startsWith("."))
+                    .forEach(files::add);
+        }
+        files.sort(Comparator.comparing(path -> dir.relativize(path).toString().toLowerCase()));
+        return files;
+    }
+
     private static void sendMethodNotAllowed(HttpExchange exchange) throws IOException {
         sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
     }
@@ -561,6 +735,9 @@ public final class HelionWebServer {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         Headers headers = exchange.getResponseHeaders();
         headers.set("Content-Type", contentType);
+        headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+        headers.set("Pragma", "no-cache");
+        headers.set("Expires", "0");
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream output = exchange.getResponseBody()) {
             output.write(bytes);

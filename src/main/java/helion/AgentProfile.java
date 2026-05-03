@@ -9,6 +9,7 @@ public record AgentProfile(
         Path distillFile,
         Path statusFile,
         Path runtimeFile,
+        Path activityFile,
         Path distilledDir,
         Path workspaceDir) {
 }

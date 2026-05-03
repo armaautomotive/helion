@@ -1,7 +1,9 @@
 # Prospecting Agent Status
 
-Execution state: local_running
-Run interval seconds: 300
+Run state: running
+Execution target: local
+Run interval seconds: 15
+Primary output file: workspace/prospects.md
 
 Current objective:
 - Build an initial list of companies that could plausibly benefit from the CNC tube notcher.
@@ -13,4 +15,4 @@ Current output locations:
 Context maintenance:
 - Distill useful sales and product facts into `distilled/`
 - Keep the workspace files focused on active prospecting work
-Last run: 2026-05-02T17:40:39.700387
+Last run: 2026-05-02T18:30:29.851395

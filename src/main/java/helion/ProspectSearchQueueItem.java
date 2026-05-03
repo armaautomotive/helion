@@ -1,6 +1,6 @@
 package helion;
 
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 public record ProspectSearchQueueItem(
         int id,
@@ -10,8 +10,8 @@ public record ProspectSearchQueueItem(
         String industry,
         int pass,
         String status,
-        LocalDate lastRun,
-        LocalDate nextRun,
+        LocalDateTime lastRun,
+        LocalDateTime nextRun,
         int resultsSeen,
         String notes) {
 
@@ -32,12 +32,12 @@ public record ProspectSearchQueueItem(
         return query.toString().trim();
     }
 
-    public ProspectSearchQueueItem afterRun(int newResultsSeen) {
+    public ProspectSearchQueueItem afterRun(int newResultsSeen, int delaySeconds) {
         int currentPass = Math.max(1, pass);
         int nextPass = currentPass >= 4 ? 1 : currentPass + 1;
-        LocalDate today = LocalDate.now();
-        LocalDate nextDate = currentPass >= 4 ? today.plusDays(30) : today.plusDays(1);
-        String nextStatus = currentPass >= 4 ? "scheduled" : "active";
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime nextDate = now.plusSeconds(Math.max(5, delaySeconds));
+        String nextStatus = "active";
         return new ProspectSearchQueueItem(
                 id,
                 queryTemplate,
@@ -46,17 +46,17 @@ public record ProspectSearchQueueItem(
                 industry,
                 nextPass,
                 nextStatus,
-                today,
+                now,
                 nextDate,
                 Math.max(0, newResultsSeen),
                 notes);
     }
 
-    public boolean isDue(LocalDate today) {
+    public boolean isDue(LocalDateTime now) {
         if ("paused".equalsIgnoreCase(status) || "done".equalsIgnoreCase(status)) {
             return false;
         }
-        return nextRun == null || !nextRun.isAfter(today);
+        return nextRun == null || !nextRun.isAfter(now);
     }
 
     public String toCsvRow() {
@@ -68,8 +68,8 @@ public record ProspectSearchQueueItem(
                 csv(industry),
                 csv(Integer.toString(pass)),
                 csv(status),
-                csv(lastRun == null ? "" : lastRun.toString()),
-                csv(nextRun == null ? "" : nextRun.toString()),
+                csv(formatDateTime(lastRun)),
+                csv(formatDateTime(nextRun)),
                 csv(Integer.toString(resultsSeen)),
                 csv(notes));
     }
@@ -91,5 +91,12 @@ public record ProspectSearchQueueItem(
     private static String csv(String value) {
         String text = value == null ? "" : value;
         return "\"" + text.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String formatDateTime(LocalDateTime value) {
+        if (value == null || LocalDateTime.MIN.equals(value)) {
+            return "";
+        }
+        return value.toString();
     }
 }

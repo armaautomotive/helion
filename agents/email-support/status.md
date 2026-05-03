@@ -1,7 +1,9 @@
 # Email Support Agent Status
 
-Execution state: paused
+Run state: paused
+Execution target: cloud
 Run interval seconds: 300
+Primary output file: workspace/reply_drafts.md
 
 Current objective:
 - Build reusable response context for customer and prospect email handling.

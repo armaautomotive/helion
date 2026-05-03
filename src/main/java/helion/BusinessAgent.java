@@ -1,6 +1,9 @@
 package helion;
 
 import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -32,14 +35,27 @@ public final class BusinessAgent {
         this.distiller = new AgentDistiller(manager, knowledgeBase, companyDataCorpus);
         this.memoryStore = memoryStore;
         this.emailDraftStore = emailDraftStore;
-        this.prospectStore = new ProspectStore(agentRegistry);
+        this.prospectStore = new ProspectStore(agentRegistry, config);
         this.prospectSearchQueueStore = new ProspectSearchQueueStore(agentRegistry);
         this.config = config;
     }
 
     public String respond(AgentRequest request) throws IOException, InterruptedException {
-        if ("demo".equals(manager.name())) {
-            String finalAnswer = manager.complete(buildSystemPrompt(request.mode()), buildUserPrompt(request)).trim();
+        return withUsageAgent(request.agentId(), () -> respond(request, true));
+    }
+
+    public String respondPlain(AgentRequest request) throws IOException, InterruptedException {
+        return withUsageAgent(request.agentId(), () -> respond(request, false));
+    }
+
+    private String respond(AgentRequest request, boolean styledOutput) throws IOException, InterruptedException {
+        String grounded = groundedLightweightResponse(request, styledOutput);
+        if (!grounded.isBlank()) {
+            return grounded;
+        }
+        LlmProvider coordinator = coordinatorProvider(request.agentId());
+        if ("demo".equals(coordinator.name())) {
+            String finalAnswer = coordinator.complete(buildSystemPrompt(request.mode()), buildUserPrompt(request)).trim();
             persistFinalAnswer(request, finalAnswer);
             return finalAnswer;
         }
@@ -51,12 +67,12 @@ public final class BusinessAgent {
         observations.add(loadAutomaticMemoryContext(request));
         for (int turn = 1; turn <= config.maxTurns(); turn++) {
             String systemPrompt = buildManagerSystemPrompt(request.mode());
-            String userPrompt = buildManagerUserPrompt(request, observations, turn);
-            ManagerAction action = ManagerActionParser.parse(manager.complete(systemPrompt, userPrompt));
+            String userPrompt = buildManagerUserPrompt(request, observations, turn, coordinator);
+            ManagerAction action = ManagerActionParser.parse(coordinator.complete(systemPrompt, userPrompt));
 
             switch (action) {
                 case FinalAction finalAction -> {
-                    String finalAnswer = formatFinalAnswer(finalAction.content());
+                    String finalAnswer = formatFinalAnswer(finalAction.content(), styledOutput);
                     persistFinalAnswer(request, finalAnswer);
                     return finalAnswer;
                 }
@@ -69,7 +85,7 @@ public final class BusinessAgent {
         }
 
         String fallbackPrompt = buildFallbackPrompt(request, observations);
-        String finalAnswer = formatFinalAnswer(manager.complete(buildSystemPrompt(request.mode()), fallbackPrompt).trim());
+        String finalAnswer = formatFinalAnswer(coordinator.complete(buildSystemPrompt(request.mode()), fallbackPrompt).trim(), styledOutput);
         persistFinalAnswer(request, finalAnswer);
         return finalAnswer;
     }
@@ -150,6 +166,7 @@ public final class BusinessAgent {
                 - Use the agent role and distilled observations to stay within the selected agent's job.
                 - Use the knowledge observation as the source of truth for what the business sells, who it serves, and which pains it solves.
                 - Use company data when internal documents are relevant, but do not treat raw company data as cleaner than curated agent-distilled notes.
+                - Treat the selected agent's primary output file as the canonical deliverable you are helping improve.
                 - Use WORKER for focused subtasks that benefit from a separate model pass.
                 - Use FINAL when you have enough information and follow the schema exactly.
                 - Do not include any text outside the action block.
@@ -161,14 +178,14 @@ public final class BusinessAgent {
         return "Agent: " + agentId + "\nMode: " + request.mode().name().toLowerCase() + "\nBusiness request:\n" + request.prompt();
     }
 
-    private String buildManagerUserPrompt(AgentRequest request, List<ToolObservation> observations, int turn) {
+    private String buildManagerUserPrompt(AgentRequest request, List<ToolObservation> observations, int turn, LlmProvider coordinator) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("Mode: ").append(request.mode().name().toLowerCase()).append('\n');
         prompt.append("Business request:\n").append(request.prompt()).append('\n');
         prompt.append('\n');
         prompt.append("Runtime\n");
         prompt.append("- Turn: ").append(turn).append(" / ").append(config.maxTurns()).append('\n');
-        prompt.append("- Manager provider: ").append(manager.name()).append('\n');
+        prompt.append("- Coordinator provider: ").append(coordinator.name()).append('\n');
         prompt.append("- Worker count: ").append(workerPool.size()).append('\n');
         prompt.append("- Browser enabled: ").append(browserTool.isEnabled()).append('\n');
         prompt.append("- Agents dir: ").append(agentRegistry.describe()).append('\n');
@@ -251,6 +268,7 @@ public final class BusinessAgent {
                 - Use web search and page fetches to validate the company and contact details.
                 - Do not invent contact names or email addresses; leave them blank if unsupported.
                 - Prefer companies with evidence of repeated tube fabrication, welded tube assemblies, frames, chassis, cages, racks, or similar work.
+                - Treat the prospecting agent's primary output file as the main deliverable this workflow is updating.
                 - Prioritize quality over quantity.
                 - Do not include commentary outside action blocks.
                 """.formatted(Math.max(1, count));
@@ -361,11 +379,16 @@ public final class BusinessAgent {
         AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
         String distilled = new DirectoryCorpus(true, profile.distilledDir(), 8000, 3).loadContext();
         String workspace = new DirectoryCorpus(true, profile.workspaceDir(), 8000, 3).loadContext();
+        String primaryOutput = loadPrimaryOutput(profile, status);
 
         StringBuilder out = new StringBuilder();
         out.append("Agent ID: ").append(profile.id()).append('\n');
         out.append("Role:\n").append(role.isBlank() ? "No role.md content." : role).append('\n').append('\n');
         out.append("Status:\n").append(status.renderedStatus()).append('\n').append('\n');
+        if (!status.primaryOutputFile().isBlank()) {
+            out.append("Primary output file: ").append(status.primaryOutputFile()).append('\n');
+            out.append("Primary output content:\n").append(primaryOutput.isBlank() ? "(empty)" : primaryOutput).append('\n').append('\n');
+        }
         out.append("Distilled context:\n").append(distilled).append('\n').append('\n');
         out.append("Workspace context:\n").append(workspace);
         return new ToolObservation("agent", profile.id(), out.toString().trim());
@@ -387,9 +410,9 @@ public final class BusinessAgent {
         return agentPrefix + request.mode().name().toLowerCase() + "-" + compact;
     }
 
-    private String formatFinalAnswer(String raw) {
+    private String formatFinalAnswer(String raw, boolean styledOutput) {
         FinalResponse parsed = FinalResponseParser.parse(raw);
-        return parsed.render();
+        return styledOutput ? parsed.render() : parsed.renderPlain();
     }
 
     public String emailConfigReport() {
@@ -401,11 +424,22 @@ public final class BusinessAgent {
     }
 
     public String collectProspects(String agentId, String searchFocus, int count) throws IOException, InterruptedException {
+        return collectProspects(agentId, searchFocus, count, "cloud");
+    }
+
+    public String collectProspects(String agentId, String searchFocus, int count, String executionTarget) throws IOException, InterruptedException {
+        return withUsageAgent(agentId, () -> collectProspectsInternal(agentId, searchFocus, count, executionTarget));
+    }
+
+    private String collectProspectsInternal(String agentId, String searchFocus, int count, String executionTarget) throws IOException, InterruptedException {
         AgentProfile profile = agentRegistry.load(agentId);
         if (profile == null) {
             return "Unknown agent: " + agentId;
         }
-        if ("demo".equals(manager.name())) {
+        AgentActivityStore activityStore = new AgentActivityStore();
+        LlmProvider autonomousProvider = autonomousProvider(executionTarget);
+        if ("demo".equals(autonomousProvider.name())) {
+            logAgentActivity(activityStore, profile, "info", "prospecting", "Demo mode prospecting run", "Search focus: " + searchFocus);
             List<ProspectRecord> demoRecords = List.of(
                     new ProspectRecord(
                             "Example Fabrication Co.",
@@ -427,7 +461,9 @@ public final class BusinessAgent {
                             "Demo mode cannot browse live web results, so this is a placeholder prospect.",
                             List.of(),
                             "Run prospecting with a live manager and browser enabled to gather real contacts."));
-            return prospectStore.save(agentId, searchFocus, demoRecords);
+            String saved = prospectStore.save(agentId, searchFocus, demoRecords);
+            logAgentActivity(activityStore, profile, "success", "prospecting", "Saved demo prospect output", saved);
+            return saved;
         }
 
         AgentRequest request = new AgentRequest(AgentMode.ANALYZE, searchFocus, agentId);
@@ -436,38 +472,266 @@ public final class BusinessAgent {
         observations.add(loadKnowledgeContext());
         observations.add(loadCompanyDataContext());
         observations.add(loadAutomaticMemoryContext(request));
+        boolean hasGroundedWebEvidence = false;
+        logAgentActivity(
+                activityStore,
+                profile,
+                "info",
+                "prospecting",
+                "Started prospecting workflow",
+                "Search focus: " + searchFocus + "\nExecution target: " + executionTarget + "\nRequested prospect count: " + count);
         for (int turn = 1; turn <= config.maxTurns(); turn++) {
             String systemPrompt = buildProspectingSystemPrompt(count);
             String userPrompt = buildProspectingUserPrompt(searchFocus, count, observations, turn);
-            ManagerAction action = ManagerActionParser.parse(manager.complete(systemPrompt, userPrompt));
+            ManagerAction action;
+            try {
+                action = ManagerActionParser.parse(autonomousProvider.complete(systemPrompt, userPrompt));
+            } catch (IOException ex) {
+                        logProspectingFailure(
+                                activityStore,
+                                profile,
+                                "llm",
+                                "Coordinator request failed",
+                                "Turn: " + turn + "\nProvider: " + autonomousProvider.name() + "\nError: " + nonBlank(ex.getMessage()));
+                        throw ex;
+            }
+            logAgentActivity(
+                    activityStore,
+                    profile,
+                    "info",
+                    "prospecting-turn",
+                    "Turn " + turn + " selected " + actionName(action),
+                    prospectingActionDetails(action));
 
             switch (action) {
                 case FinalAction finalAction -> {
                     List<ProspectRecord> records = ProspectParser.parse(finalAction.content());
                     if (records.isEmpty()) {
+                        logAgentActivity(
+                                activityStore,
+                                profile,
+                                "error",
+                                "prospecting-final",
+                                "No structured prospects returned",
+                                TextUtils.limit(finalAction.content(), 1200));
                         return "No structured prospects were returned. Try a narrower search focus.";
                     }
-                    return prospectStore.save(agentId, searchFocus, records);
+                    if (!hasGroundedWebEvidence) {
+                        logAgentActivity(
+                                activityStore,
+                                profile,
+                                "error",
+                                "prospecting-final",
+                                "Blocked ungrounded prospect output",
+                                "The model returned prospects without any grounded search or fetch evidence.\n\n"
+                                        + TextUtils.limit(finalAction.content(), 1200));
+                        return "Prospecting produced ungrounded output without live web evidence. No prospects were saved.";
+                    }
+                    List<ProspectRecord> groundedRecords = filterGroundedProspects(records);
+                    if (groundedRecords.isEmpty()) {
+                        logAgentActivity(
+                                activityStore,
+                                profile,
+                                "error",
+                                "prospecting-final",
+                                "Blocked prospects with no source URLs",
+                                TextUtils.limit(finalAction.content(), 1200));
+                        return "Prospecting returned records without usable source URLs. No prospects were saved.";
+                    }
+                    String saved = prospectStore.save(agentId, searchFocus, groundedRecords);
+                    logAgentActivity(
+                            activityStore,
+                            profile,
+                            "success",
+                            "prospecting-final",
+                            "Saved " + groundedRecords.size() + " parsed prospects",
+                            renderProspectSummary(groundedRecords) + "\n\n" + saved);
+                    return saved;
                 }
-                case WorkerAction workerAction -> observations.add(runWorker(workerAction, request));
-                case SearchAction searchAction -> observations.add(runSearch(searchAction));
-                case FetchAction fetchAction -> observations.add(runFetch(fetchAction));
-                case ReadMemoryAction readMemoryAction -> observations.add(runMemoryRead(readMemoryAction));
-                case WriteMemoryAction writeMemoryAction -> observations.add(runMemoryWrite(writeMemoryAction));
+                case WorkerAction workerAction -> {
+                    ToolObservation workerObservation;
+                    try {
+                        workerObservation = runWorker(workerAction, request);
+                    } catch (IOException ex) {
+                        logProspectingFailure(
+                                activityStore,
+                                profile,
+                                "worker",
+                                "Worker action failed: " + workerAction.title(),
+                                "Turn: " + turn + "\nError: " + nonBlank(ex.getMessage()));
+                        throw ex;
+                    }
+                    observations.add(workerObservation);
+                    logAgentActivity(
+                            activityStore,
+                            profile,
+                            "info",
+                            "worker",
+                            "Worker completed: " + workerAction.title(),
+                            TextUtils.limit(workerObservation.content(), 1200));
+                }
+                case SearchAction searchAction -> {
+                    BrowserSearchResult result;
+                    try {
+                        result = browserTool.search(searchAction.query(), searchAction.limit());
+                    } catch (IOException ex) {
+                        logProspectingFailure(
+                                activityStore,
+                                profile,
+                                "search",
+                                "Browser search failed",
+                                "Turn: " + turn + "\nQuery: " + searchAction.query() + "\nError: " + nonBlank(ex.getMessage()));
+                        throw ex;
+                    }
+                    observations.add(new ToolObservation("search", searchAction.query(), result.render()));
+                    if (!result.items().isEmpty()) {
+                        hasGroundedWebEvidence = true;
+                    }
+                    logAgentActivity(
+                            activityStore,
+                            profile,
+                            "info",
+                            "search",
+                            "Found " + result.items().size() + " search results",
+                            renderSearchActivity(result));
+                }
+                case FetchAction fetchAction -> {
+                    BrowserPage page;
+                    try {
+                        page = browserTool.fetch(fetchAction.url());
+                    } catch (IOException ex) {
+                        logProspectingFailure(
+                                activityStore,
+                                profile,
+                                "fetch",
+                                "Browser fetch failed",
+                                "Turn: " + turn + "\nURL: " + fetchAction.url() + "\nError: " + nonBlank(ex.getMessage()));
+                        throw ex;
+                    }
+                    observations.add(new ToolObservation("fetch", fetchAction.url(), page.render()));
+                    if (!page.content().isBlank()) {
+                        hasGroundedWebEvidence = true;
+                    }
+                    logAgentActivity(
+                            activityStore,
+                            profile,
+                            "info",
+                            "fetch",
+                            "Investigating " + fetchAction.url(),
+                            renderFetchActivity(page));
+                }
+                case ReadMemoryAction readMemoryAction -> {
+                    ToolObservation memoryObservation = runMemoryRead(readMemoryAction);
+                    observations.add(memoryObservation);
+                    logAgentActivity(
+                            activityStore,
+                            profile,
+                            "info",
+                            "memory-read",
+                            "Loaded memory key " + readMemoryAction.key(),
+                            TextUtils.limit(memoryObservation.content(), 1200));
+                }
+                case WriteMemoryAction writeMemoryAction -> {
+                    ToolObservation memoryObservation = runMemoryWrite(writeMemoryAction);
+                    observations.add(memoryObservation);
+                    logAgentActivity(
+                            activityStore,
+                            profile,
+                            "info",
+                            "memory-write",
+                            "Saved memory key " + writeMemoryAction.key(),
+                            TextUtils.limit(writeMemoryAction.content(), 1200));
+                }
             }
         }
+        logAgentActivity(
+                activityStore,
+                profile,
+                "error",
+                "prospecting",
+                "Prospecting turn limit reached",
+                "Search focus: " + searchFocus + "\nMax turns: " + config.maxTurns());
         return "Prospecting did not complete within " + config.maxTurns() + " turns.";
     }
 
+    private void logProspectingFailure(AgentActivityStore activityStore, AgentProfile profile, String task, String summary, String details) {
+        logAgentActivity(activityStore, profile, "error", task, summary, details);
+    }
+
+    private String nonBlank(String value) {
+        return value == null || value.isBlank() ? "(none)" : value;
+    }
+
+    private List<ProspectRecord> filterGroundedProspects(List<ProspectRecord> records) {
+        List<ProspectRecord> grounded = new ArrayList<>();
+        for (ProspectRecord record : records) {
+            if (record == null) {
+                continue;
+            }
+            if (record.sourceUrls() == null || record.sourceUrls().isEmpty()) {
+                continue;
+            }
+            boolean hasUsableUrl = false;
+            for (String url : record.sourceUrls()) {
+                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                    hasUsableUrl = true;
+                    break;
+                }
+            }
+            if (hasUsableUrl) {
+                grounded.add(record);
+            }
+        }
+        return grounded;
+    }
+
     public String collectQueuedProspects(String agentId, int count) throws IOException, InterruptedException {
+        return collectQueuedProspects(agentId, count, "cloud");
+    }
+
+    public String collectQueuedProspects(String agentId, int count, String executionTarget) throws IOException, InterruptedException {
+        return collectQueuedProspectsBatch(agentId, count, 1, executionTarget);
+    }
+
+    public String collectQueuedProspectsBatch(String agentId, int count, int maxItems, String executionTarget) throws IOException, InterruptedException {
+        List<ProspectSearchQueueItem> dueItems = prospectSearchQueueStore.dueItems(agentId, Math.max(1, maxItems));
+        if (dueItems.isEmpty()) {
+            return "";
+        }
+        int delaySeconds = queueDelaySeconds(agentId);
+        StringBuilder out = new StringBuilder();
+        int processed = 0;
+        for (ProspectSearchQueueItem item : dueItems) {
+            if (processed > 0) {
+                out.append("\n\n");
+            }
+            String result = collectProspects(agentId, item.effectiveQuery(), count, executionTarget);
+            int resultsSeen = extractSavedCount(result);
+            ProspectSearchQueueItem updated = item.afterRun(item.resultsSeen() + resultsSeen, delaySeconds);
+            prospectSearchQueueStore.markRun(agentId, updated);
+            out.append("Queue item ").append(item.id()).append(":\n");
+            out.append(result).append('\n');
+            out.append("Advanced: ").append(item.summaryLine()).append(" -> pass ").append(updated.pass());
+            processed++;
+        }
+        out.append("\n\nProcessed ").append(processed).append(" queued prospect search");
+        if (processed != 1) {
+            out.append("es");
+        }
+        out.append(".");
+        return out.toString().trim();
+    }
+
+    public String collectQueuedProspectsSingle(String agentId, int count, String executionTarget) throws IOException, InterruptedException {
         ProspectSearchQueueItem item = prospectSearchQueueStore.nextDue(agentId);
         if (item == null) {
             return "No due prospecting queue items.";
         }
-        String result = collectProspects(agentId, item.effectiveQuery(), count);
+        String result = collectProspects(agentId, item.effectiveQuery(), count, executionTarget);
         int resultsSeen = extractSavedCount(result);
-        prospectSearchQueueStore.markRun(agentId, item.afterRun(item.resultsSeen() + resultsSeen));
-        return result + "\nQueue item advanced: " + item.summaryLine() + " -> pass " + item.afterRun(item.resultsSeen() + resultsSeen).pass();
+        ProspectSearchQueueItem updated = item.afterRun(item.resultsSeen() + resultsSeen, queueDelaySeconds(agentId));
+        prospectSearchQueueStore.markRun(agentId, updated);
+        return result + "\nQueue item advanced: " + item.summaryLine() + " -> pass " + updated.pass();
     }
 
     public String addProspectQueueItem(String agentId, String queryTemplate, String region, String city, String industry, String notes) throws IOException {
@@ -502,11 +766,47 @@ public final class BusinessAgent {
         }
     }
 
+    private LlmProvider autonomousProvider(String executionTarget) {
+        String target = executionTarget == null ? "" : executionTarget.trim().toLowerCase();
+        if ("local".equals(target)) {
+            return workerPool.primaryWorker();
+        }
+        return manager;
+    }
+
+    private int queueDelaySeconds(String agentId) throws IOException {
+        if (agentId == null || agentId.isBlank()) {
+            return 60;
+        }
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return 60;
+        }
+        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+        return Math.max(5, status.runIntervalSeconds());
+    }
+
+    private LlmProvider coordinatorProvider(String agentId) throws IOException {
+        if (agentId == null || agentId.isBlank()) {
+            return manager;
+        }
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return manager;
+        }
+        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+        return autonomousProvider(status.executionTarget());
+    }
+
     public String usageReport() throws IOException {
         return usageTracker.renderText();
     }
 
     public String distillAgent(String agentId) throws IOException, InterruptedException {
+        return withUsageAgent(agentId, () -> distillAgentInternal(agentId));
+    }
+
+    private String distillAgentInternal(String agentId) throws IOException, InterruptedException {
         AgentProfile profile = agentRegistry.load(agentId);
         if (profile == null) {
             return "Unknown agent: " + agentId;
@@ -523,10 +823,544 @@ public final class BusinessAgent {
         return out.toString().trim();
     }
 
+    private String withUsageAgent(String agentId, UsageAction action) throws IOException, InterruptedException {
+        try {
+            return UsageContext.withAgent(agentId, action::run);
+        } catch (IOException ex) {
+            throw ex;
+        } catch (InterruptedException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            throw new IllegalStateException("Unexpected usage-context failure.", ex);
+        }
+    }
+
+    @FunctionalInterface
+    private interface UsageAction {
+        String run() throws IOException, InterruptedException;
+    }
+
     private String readIfExists(java.nio.file.Path file) throws IOException {
         if (file == null || java.nio.file.Files.exists(file) == false) {
             return "";
         }
         return java.nio.file.Files.readString(file).trim();
+    }
+
+    private String loadPrimaryOutput(AgentProfile profile, AgentStatus status) throws IOException {
+        String relative = status.primaryOutputFile();
+        if (relative == null || relative.isBlank()) {
+            return "";
+        }
+        String normalized = relative.replace('\\', '/');
+        if (normalized.startsWith("workspace/")) {
+            normalized = normalized.substring("workspace/".length());
+        }
+        return readIfExists(profile.workspaceDir().resolve(normalized));
+    }
+
+    private String groundedLightweightResponse(AgentRequest request, boolean styledOutput) throws IOException {
+        String prompt = request.prompt() == null ? "" : request.prompt().trim();
+        if (prompt.isBlank()) {
+            return "";
+        }
+        if (isGreetingPrompt(prompt)) {
+            return renderSimpleFinal(
+                    "ready",
+                    request.agentId() == null || request.agentId().isBlank() ? "Helion" : request.agentId() + " ready",
+                    greetingSummary(request.agentId()),
+                    greetingDetails(request.agentId()),
+                    List.of("Ask for status, current output, or a specific task."),
+                    List.of("Grounded from current agent status and output files."),
+                    styledOutput);
+        }
+        if (looksLikeStatusPrompt(prompt)) {
+            return renderSimpleFinal(
+                    "ready",
+                    statusTitle(request.agentId()),
+                    statusSummary(request.agentId()),
+                    statusDetails(request.agentId()),
+                    List.of("Ask for a specific task if you want the agent to do work next."),
+                    List.of("Grounded from the configured primary output file and current agent status."),
+                    styledOutput);
+        }
+        return "";
+    }
+
+    private boolean isGreetingPrompt(String prompt) {
+        String normalized = prompt.trim().toLowerCase();
+        return normalized.equals("hi")
+                || normalized.equals("hello")
+                || normalized.equals("hey")
+                || normalized.equals("yo")
+                || normalized.equals("good morning")
+                || normalized.equals("good afternoon")
+                || normalized.equals("good evening");
+    }
+
+    private boolean looksLikeStatusPrompt(String prompt) {
+        String normalized = prompt.trim().toLowerCase();
+        return normalized.contains("status")
+                || normalized.contains("what are you working on")
+                || normalized.contains("what are you doing")
+                || normalized.contains("pipeline")
+                || normalized.contains("current output")
+                || normalized.contains("how many prospects")
+                || normalized.contains("show prospects")
+                || normalized.contains("what have you found");
+    }
+
+    private String greetingSummary(String agentId) throws IOException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return "Ready to help.";
+        }
+        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+        String outputSummary = summarizePrimaryOutput(profile, status);
+        return profile.id() + " is " + status.runState() + " on " + status.executionTarget() + ". " + outputSummary;
+    }
+
+    private String greetingDetails(String agentId) throws IOException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return "Ask for a business task, status summary, or a specific workflow.";
+        }
+        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+        return """
+                Agent: %s
+                Run state: %s
+                Execution target: %s
+                Primary output: %s
+                """.formatted(
+                profile.id(),
+                status.runState(),
+                status.executionTarget(),
+                status.primaryOutputFile().isBlank() ? "(none)" : status.primaryOutputFile()).trim();
+    }
+
+    private String statusTitle(String agentId) {
+        return (agentId == null || agentId.isBlank() ? "Agent" : agentId) + " status";
+    }
+
+    private String statusSummary(String agentId) throws IOException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return "No specific agent selected.";
+        }
+        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+        return summarizePrimaryOutput(profile, status);
+    }
+
+    private String statusDetails(String agentId) throws IOException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return "No specific agent selected.";
+        }
+        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+        String outputContent = loadPrimaryOutput(profile, status);
+        StringBuilder out = new StringBuilder();
+        out.append("Run state: ").append(status.runState()).append('\n');
+        out.append("Execution target: ").append(status.executionTarget()).append('\n');
+        out.append("Primary output file: ").append(status.primaryOutputFile().isBlank() ? "(none)" : status.primaryOutputFile()).append('\n');
+        out.append('\n');
+        out.append("Grounded output summary:\n").append(summarizePrimaryOutput(profile, status)).append('\n');
+        out.append('\n');
+        out.append("Current output preview:\n").append(outputContent.isBlank() ? "(empty)" : TextUtils.limit(outputContent, 1200));
+        return out.toString().trim();
+    }
+
+    private String summarizePrimaryOutput(AgentProfile profile, AgentStatus status) throws IOException {
+        if (status.primaryOutputFile().isBlank()) {
+            return "No primary output file is configured.";
+        }
+        Path outputFile = AgentOutputResolver.resolvePrimaryOutputFile(profile, config, status.primaryOutputFile());
+        if (!Files.exists(outputFile)) {
+            return "The primary output file does not exist yet.";
+        }
+        if ("prospecting".equals(profile.id())) {
+            Path csvFile = profile.workspaceDir().resolve("prospects.csv");
+            int count = countCsvRecords(csvFile);
+            return count == 0
+                    ? "There are currently 0 saved prospects in the tracked prospect list."
+                    : "There are currently " + count + " saved prospects in the tracked prospect list.";
+        }
+        String content = Files.readString(outputFile).trim();
+        if (content.isBlank()) {
+            return "The primary output file exists but is currently empty.";
+        }
+        return "The primary output file has content and is being used as the active deliverable.";
+    }
+
+    private int countCsvRecords(Path csvFile) throws IOException {
+        if (csvFile == null || !Files.exists(csvFile)) {
+            return 0;
+        }
+        List<String> lines = Files.readAllLines(csvFile);
+        int count = 0;
+        for (int i = 1; i < lines.size(); i++) {
+            if (!lines.get(i).trim().isBlank()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private String renderSimpleFinal(String status, String title, String summary, String details, List<String> nextSteps, List<String> sources, boolean styledOutput) {
+        FinalResponse response = new FinalResponse(status, title, summary, details, nextSteps, sources);
+        return styledOutput ? response.render() : response.renderPlain();
+    }
+
+    private void logAgentActivity(AgentActivityStore store, AgentProfile profile, String level, String task, String summary, String details) {
+        if (profile == null) {
+            return;
+        }
+        try {
+            store.append(profile, new AgentActivityEntry(java.time.LocalDateTime.now(), level, task, summary, details));
+        } catch (IOException ignored) {
+        }
+    }
+
+    private String prospectingActionDetails(ManagerAction action) {
+        return switch (action) {
+            case WorkerAction workerAction -> "Worker title: " + workerAction.title() + "\nPrompt:\n" + TextUtils.limit(workerAction.prompt(), 1200);
+            case SearchAction searchAction -> "Query: " + searchAction.query() + "\nLimit: " + searchAction.limit();
+            case FetchAction fetchAction -> "URL: " + fetchAction.url();
+            case ReadMemoryAction readMemoryAction -> "Key: " + readMemoryAction.key();
+            case WriteMemoryAction writeMemoryAction -> "Key: " + writeMemoryAction.key() + "\nContent:\n" + TextUtils.limit(writeMemoryAction.content(), 1200);
+            case FinalAction finalAction -> "Final content preview:\n" + TextUtils.limit(finalAction.content(), 1200);
+        };
+    }
+
+    private String actionName(ManagerAction action) {
+        return switch (action) {
+            case WorkerAction ignored -> "WORKER";
+            case SearchAction ignored -> "SEARCH";
+            case FetchAction ignored -> "FETCH";
+            case ReadMemoryAction ignored -> "READ_MEMORY";
+            case WriteMemoryAction ignored -> "WRITE_MEMORY";
+            case FinalAction ignored -> "FINAL";
+        };
+    }
+
+    private String renderSearchActivity(BrowserSearchResult result) {
+        StringBuilder out = new StringBuilder();
+        out.append("Query: ").append(result.query()).append('\n');
+        out.append("Results found: ").append(result.items().size()).append('\n');
+        if (result.note() != null && !result.note().isBlank()) {
+            out.append("Note: ").append(result.note()).append('\n');
+        }
+        for (int i = 0; i < result.items().size(); i++) {
+            SearchResultItem item = result.items().get(i);
+            String relevance = relevanceLabel(result.query(), item.title(), item.url(), item.snippet());
+            String companyGuess = companyGuess(item.title(), item.url());
+            out.append('\n').append(i + 1).append(". ").append(item.title()).append('\n');
+            out.append("URL: ").append(item.url()).append('\n');
+            out.append("Domain: ").append(domainOf(item.url())).append('\n');
+            out.append("Company guess: ").append(companyGuess).append('\n');
+            out.append("Relevance: ").append(relevance).append('\n');
+            String keywordSignals = keywordSignals(result.query(), item.title(), item.url(), item.snippet());
+            if (!keywordSignals.isBlank()) {
+                out.append("Matched signals: ").append(keywordSignals).append('\n');
+            }
+            if (!item.snippet().isBlank()) {
+                out.append("Snippet: ").append(item.snippet()).append('\n');
+            }
+        }
+        return out.toString().trim();
+    }
+
+    private String renderFetchActivity(BrowserPage page) {
+        StringBuilder out = new StringBuilder();
+        out.append("URL: ").append(page.url()).append('\n');
+        out.append("Domain: ").append(domainOf(page.url())).append('\n');
+        if (page.title() != null && !page.title().isBlank()) {
+            out.append("Title: ").append(page.title()).append('\n');
+        }
+        out.append("Company guess: ").append(companyGuess(page.title(), page.url())).append('\n');
+        out.append("Page type: ").append(classifyPageType(page.url(), page.title(), page.content())).append('\n');
+        String contactSignals = contactSignals(page.content());
+        if (!contactSignals.isBlank()) {
+            out.append("Contact signals: ").append(contactSignals).append('\n');
+        }
+        out.append("Tube-work relevance: ").append(relevanceLabel("", page.title(), page.url(), page.content())).append('\n');
+        String contentSignals = contentSignals(page.content());
+        if (!contentSignals.isBlank()) {
+            out.append("Content signals: ").append(contentSignals).append('\n');
+        }
+        if (page.note() != null && !page.note().isBlank()) {
+            out.append("Note: ").append(page.note()).append('\n');
+        }
+        out.append('\n').append("Preview:\n").append(TextUtils.limit(page.content(), 1200));
+        return out.toString().trim();
+    }
+
+    private String renderProspectSummary(List<ProspectRecord> records) {
+        StringBuilder out = new StringBuilder();
+        out.append("Parsed prospects: ").append(records.size()).append('\n');
+        for (ProspectRecord record : records) {
+            out.append('\n').append("- ").append(record.company().isBlank() ? "(unknown company)" : record.company());
+            out.append(" | fit: ").append(record.fitScore().isBlank() ? "(unspecified)" : record.fitScore());
+            out.append(" | website: ").append(record.website().isBlank() ? "(none)" : record.website());
+            out.append(" | location: ").append(record.location().isBlank() ? "(unknown)" : record.location());
+            out.append(" | contact: ").append(contactSummary(record));
+            out.append(" | sources: ").append(record.sourceUrls() == null ? 0 : record.sourceUrls().size());
+        }
+        return out.toString().trim();
+    }
+
+    private String relevanceLabel(String query, String title, String url, String text) {
+        int score = relevanceScore(query, title, url, text);
+        if (score >= 5) {
+            return "high";
+        }
+        if (score >= 3) {
+            return "medium";
+        }
+        return "low";
+    }
+
+    private int relevanceScore(String query, String title, String url, String text) {
+        String combined = ((title == null ? "" : title) + " " + (url == null ? "" : url) + " " + (text == null ? "" : text)).toLowerCase();
+        int score = 0;
+        for (String token : significantTokens(query)) {
+            if (combined.contains(token)) {
+                score++;
+            }
+        }
+        String[] businessSignals = {"fabrication", "fabricator", "tube", "chassis", "roll cage", "off-road", "motorsport", "welding", "cage", "frame"};
+        for (String signal : businessSignals) {
+            if (combined.contains(signal)) {
+                score++;
+            }
+        }
+        return score;
+    }
+
+    private String keywordSignals(String query, String title, String url, String text) {
+        String combined = ((title == null ? "" : title) + " " + (url == null ? "" : url) + " " + (text == null ? "" : text)).toLowerCase();
+        List<String> hits = new ArrayList<>();
+        for (String token : significantTokens(query)) {
+            if (combined.contains(token) && !hits.contains(token)) {
+                hits.add(token);
+            }
+        }
+        String[] businessSignals = {"fabrication", "tube", "chassis", "roll cage", "off-road", "motorsport", "welding", "cage", "frame", "contact"};
+        for (String signal : businessSignals) {
+            if (combined.contains(signal) && !hits.contains(signal)) {
+                hits.add(signal);
+            }
+        }
+        return hits.isEmpty() ? "" : String.join(", ", hits);
+    }
+
+    private List<String> significantTokens(String query) {
+        List<String> tokens = new ArrayList<>();
+        if (query == null || query.isBlank()) {
+            return tokens;
+        }
+        String lower = query.toLowerCase();
+        StringBuilder current = new StringBuilder();
+        for (int i = 0; i < lower.length(); i++) {
+            char c = lower.charAt(i);
+            if (Character.isLetterOrDigit(c)) {
+                current.append(c);
+            } else if (!current.isEmpty()) {
+                addToken(tokens, current.toString());
+                current.setLength(0);
+            }
+        }
+        if (!current.isEmpty()) {
+            addToken(tokens, current.toString());
+        }
+        return tokens;
+    }
+
+    private void addToken(List<String> tokens, String token) {
+        if (token.length() < 3) {
+            return;
+        }
+        if (token.equals("the") || token.equals("and") || token.equals("for") || token.equals("with")) {
+            return;
+        }
+        if (!tokens.contains(token)) {
+            tokens.add(token);
+        }
+    }
+
+    private String companyGuess(String title, String url) {
+        String candidate = title == null ? "" : title.trim();
+        if (!candidate.isBlank()) {
+            int cut = candidate.indexOf('|');
+            if (cut < 0) {
+                cut = candidate.indexOf('-');
+            }
+            if (cut > 0) {
+                candidate = candidate.substring(0, cut).trim();
+            }
+            if (!candidate.isBlank()) {
+                return candidate;
+            }
+        }
+        String domain = domainOf(url);
+        if (domain.isBlank()) {
+            return "(unknown)";
+        }
+        int cut = domain.indexOf('.');
+        String root = cut > 0 ? domain.substring(0, cut) : domain;
+        return root.replace('-', ' ');
+    }
+
+    private String domainOf(String url) {
+        if (url == null || url.isBlank()) {
+            return "(unknown)";
+        }
+        try {
+            String host = URI.create(url.trim()).getHost();
+            if (host == null || host.isBlank()) {
+                return "(unknown)";
+            }
+            return host.startsWith("www.") ? host.substring(4) : host;
+        } catch (Exception ex) {
+            return "(unknown)";
+        }
+    }
+
+    private String classifyPageType(String url, String title, String content) {
+        String combined = ((url == null ? "" : url) + " " + (title == null ? "" : title) + " " + (content == null ? "" : TextUtils.limit(content, 400))).toLowerCase();
+        if (combined.contains("contact")) {
+            return "contact";
+        }
+        if (combined.contains("portfolio") || combined.contains("gallery") || combined.contains("projects")) {
+            return "portfolio";
+        }
+        if (combined.contains("about")) {
+            return "about";
+        }
+        if (combined.contains("services")) {
+            return "services";
+        }
+        return "general";
+    }
+
+    private String contactSignals(String content) {
+        List<String> parts = new ArrayList<>();
+        List<String> emails = extractEmails(content, 3);
+        List<String> phones = extractPhones(content, 2);
+        if (!emails.isEmpty()) {
+            parts.add("emails=" + String.join(", ", emails));
+        }
+        if (!phones.isEmpty()) {
+            parts.add("phones=" + String.join(", ", phones));
+        }
+        return String.join(" | ", parts);
+    }
+
+    private String contentSignals(String content) {
+        if (content == null || content.isBlank()) {
+            return "";
+        }
+        String lower = content.toLowerCase();
+        List<String> hits = new ArrayList<>();
+        String[] signals = {"tube", "chassis", "roll cage", "fabrication", "welding", "cnc", "plasma", "jig", "production", "prototype", "off-road", "motorsport"};
+        for (String signal : signals) {
+            if (lower.contains(signal)) {
+                hits.add(signal);
+            }
+        }
+        return hits.isEmpty() ? "" : String.join(", ", hits);
+    }
+
+    private List<String> extractEmails(String content, int limit) {
+        List<String> emails = new ArrayList<>();
+        if (content == null || content.isBlank()) {
+            return emails;
+        }
+        String text = content;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) != '@') {
+                continue;
+            }
+            int start = i - 1;
+            while (start >= 0 && isEmailChar(text.charAt(start))) {
+                start--;
+            }
+            int end = i + 1;
+            while (end < text.length() && isEmailChar(text.charAt(end))) {
+                end++;
+            }
+            String candidate = text.substring(start + 1, end).trim();
+            if (candidate.contains(".") && !emails.contains(candidate)) {
+                emails.add(candidate);
+                if (emails.size() >= limit) {
+                    break;
+                }
+            }
+        }
+        return emails;
+    }
+
+    private boolean isEmailChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '.' || c == '_' || c == '-' || c == '@' || c == '+';
+    }
+
+    private List<String> extractPhones(String content, int limit) {
+        List<String> phones = new ArrayList<>();
+        if (content == null || content.isBlank()) {
+            return phones;
+        }
+        String text = content;
+        StringBuilder current = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (Character.isDigit(c) || c == '+' || c == '-' || c == ' ' || c == '(' || c == ')') {
+                current.append(c);
+            } else {
+                maybeAddPhone(phones, current.toString(), limit);
+                current.setLength(0);
+                if (phones.size() >= limit) {
+                    break;
+                }
+            }
+        }
+        maybeAddPhone(phones, current.toString(), limit);
+        return phones;
+    }
+
+    private void maybeAddPhone(List<String> phones, String raw, int limit) {
+        if (phones.size() >= limit) {
+            return;
+        }
+        String candidate = raw.trim();
+        if (candidate.length() < 10) {
+            return;
+        }
+        int digits = 0;
+        for (int i = 0; i < candidate.length(); i++) {
+            if (Character.isDigit(candidate.charAt(i))) {
+                digits++;
+            }
+        }
+        if (digits < 10) {
+            return;
+        }
+        if (!phones.contains(candidate)) {
+            phones.add(candidate);
+        }
+    }
+
+    private String contactSummary(ProspectRecord record) {
+        List<String> parts = new ArrayList<>();
+        if (record.contactName() != null && !record.contactName().isBlank()) {
+            parts.add(record.contactName());
+        }
+        if (record.contactRole() != null && !record.contactRole().isBlank()) {
+            parts.add(record.contactRole());
+        }
+        if (record.contactEmail() != null && !record.contactEmail().isBlank()) {
+            parts.add(record.contactEmail());
+        } else if (record.phone() != null && !record.phone().isBlank()) {
+            parts.add(record.phone());
+        }
+        return parts.isEmpty() ? "(none)" : String.join(" / ", parts);
     }
 }

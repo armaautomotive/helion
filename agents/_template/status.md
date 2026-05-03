@@ -1,12 +1,15 @@
 # Agent Status
 
-State: active
+Run state: paused
+Execution target: local
+Run interval seconds: 300
+Primary output file: workspace/output.md
 
 Current objective:
 - Describe the current mission.
 
 Current output locations:
-- `workspace/`
+- `workspace/output.md`
 
 Context maintenance:
 - Describe how distilled knowledge and working files should be maintained.

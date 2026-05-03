@@ -28,6 +28,10 @@ public final class WorkerPool {
         return "[" + worker.name() + "] " + title + "\n" + result.trim();
     }
 
+    public LlmProvider primaryWorker() {
+        return workers.get(0);
+    }
+
     private LlmProvider nextWorker() {
         int index = Math.floorMod(cursor.getAndIncrement(), workers.size());
         return workers.get(index);

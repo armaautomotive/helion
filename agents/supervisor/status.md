@@ -1,7 +1,9 @@
 # Supervisor Agent Status
 
-Execution state: paused
+Run state: paused
+Execution target: cloud
 Run interval seconds: 300
+Primary output file: workspace/health_reviews.md
 
 Current objective:
 - Observe agent health and prepare for future automated supervision workflows.
