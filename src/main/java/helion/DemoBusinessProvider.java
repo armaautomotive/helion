@@ -12,7 +12,12 @@ public final class DemoBusinessProvider implements LlmProvider {
     }
 
     @Override
-    public String chat(List<LlmMessage> messages) throws IOException {
+    public String modelName() {
+        return "demo";
+    }
+
+    @Override
+    public LlmResult chatResult(List<LlmMessage> messages) throws IOException {
         String userPrompt = messages.isEmpty() ? "" : messages.get(messages.size() - 1).content();
         String request = extractBusinessRequest(userPrompt);
         String title = summarize(request);
@@ -49,7 +54,10 @@ public final class DemoBusinessProvider implements LlmProvider {
         out.append('\n');
         out.append("Input\n");
         out.append(request).append('\n');
-        return out.toString();
+        String response = out.toString();
+        int promptTokens = Math.max(1, (int) Math.ceil(userPrompt.length() / 4.0));
+        int completionTokens = Math.max(1, (int) Math.ceil(response.length() / 4.0));
+        return new LlmResult(response, new UsageMetrics(name(), modelName(), promptTokens, completionTokens, promptTokens + completionTokens, false));
     }
 
     private String extractBusinessRequest(String userPrompt) {

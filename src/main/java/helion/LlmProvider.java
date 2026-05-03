@@ -6,11 +6,17 @@ import java.util.List;
 public interface LlmProvider {
     String name();
 
-    String chat(List<LlmMessage> messages) throws IOException, InterruptedException;
+    String modelName();
+
+    LlmResult chatResult(List<LlmMessage> messages) throws IOException, InterruptedException;
+
+    default String chat(List<LlmMessage> messages) throws IOException, InterruptedException {
+        return chatResult(messages).content();
+    }
 
     default String complete(String systemPrompt, String userPrompt) throws IOException, InterruptedException {
-        return chat(List.of(
+        return chatResult(List.of(
                 new LlmMessage("system", systemPrompt),
-                new LlmMessage("user", userPrompt)));
+                new LlmMessage("user", userPrompt))).content();
     }
 }

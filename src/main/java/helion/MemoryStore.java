@@ -116,10 +116,35 @@ public final class MemoryStore {
     }
 
     private static String sanitize(String value) {
-        String cleaned = value == null ? "default" : value.trim().toLowerCase();
-        cleaned = cleaned.replaceAll("[^a-z0-9._-]+", "-");
-        cleaned = cleaned.replaceAll("-{2,}", "-");
-        cleaned = cleaned.replaceAll("^-|-$", "");
+        String input = value == null ? "default" : value.trim().toLowerCase();
+        StringBuilder out = new StringBuilder(input.length());
+        boolean lastDash = false;
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            boolean allowed = (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9')
+                    || c == '.'
+                    || c == '_'
+                    || c == '-';
+            if (allowed) {
+                if (c == '-') {
+                    if (!lastDash && out.length() > 0) {
+                        out.append(c);
+                    }
+                    lastDash = true;
+                } else {
+                    out.append(c);
+                    lastDash = false;
+                }
+            } else if (!lastDash && out.length() > 0) {
+                out.append('-');
+                lastDash = true;
+            }
+        }
+        while (out.length() > 0 && out.charAt(out.length() - 1) == '-') {
+            out.setLength(out.length() - 1);
+        }
+        String cleaned = out.toString();
         return cleaned.isBlank() ? "default" : cleaned;
     }
 }

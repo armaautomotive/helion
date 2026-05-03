@@ -7,12 +7,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class OpenAiCompatibleProvider implements LlmProvider {
-    private static final Pattern CONTENT_PATTERN =
-            Pattern.compile("\"content\"\\s*:\\s*\"((?:\\\\.|[^\\\\\"])*)\"");
     private final HttpClient httpClient;
     private final String providerName;
     private final String endpoint;
@@ -35,7 +31,12 @@ public class OpenAiCompatibleProvider implements LlmProvider {
     }
 
     @Override
-    public String chat(List<LlmMessage> messages) throws IOException, InterruptedException {
+    public String modelName() {
+        return model;
+    }
+
+    @Override
+    public LlmResult chatResult(List<LlmMessage> messages) throws IOException, InterruptedException {
         String body = buildBody(messages);
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(endpoint))
@@ -53,7 +54,10 @@ public class OpenAiCompatibleProvider implements LlmProvider {
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IOException(providerName + " API error: HTTP " + response.statusCode() + " " + response.body());
         }
-        return extractAssistantContent(response.body());
+        String responseBody = response.body();
+        String content = extractAssistantContent(responseBody);
+        UsageMetrics usage = extractUsage(responseBody, messages, content);
+        return new LlmResult(content, usage);
     }
 
     private String buildBody(List<LlmMessage> messages) {
@@ -75,10 +79,67 @@ public class OpenAiCompatibleProvider implements LlmProvider {
     }
 
     public static String extractAssistantContent(String responseBody) {
-        Matcher matcher = CONTENT_PATTERN.matcher(responseBody);
-        if (!matcher.find()) {
+        String marker = "\"content\":\"";
+        int start = responseBody.indexOf(marker);
+        if (start < 0) {
+            marker = "\"content\": \"";
+            start = responseBody.indexOf(marker);
+        }
+        if (start < 0) {
             return "";
         }
-        return TextUtils.unescapeJson(matcher.group(1));
+        start += marker.length();
+        return TextUtils.readJsonStringValue(responseBody, start);
+    }
+
+    private UsageMetrics extractUsage(String responseBody, List<LlmMessage> messages, String content) {
+        Integer prompt = extractIntField(responseBody, "prompt_tokens");
+        Integer completion = extractIntField(responseBody, "completion_tokens");
+        Integer total = extractIntField(responseBody, "total_tokens");
+        if (prompt != null && completion != null && total != null) {
+            return new UsageMetrics(providerName, model, prompt, completion, total, true);
+        }
+        int estimatedPrompt = estimateTokens(joinMessages(messages));
+        int estimatedCompletion = estimateTokens(content);
+        return new UsageMetrics(providerName, model, estimatedPrompt, estimatedCompletion, estimatedPrompt + estimatedCompletion, false);
+    }
+
+    private static Integer extractIntField(String text, String fieldName) {
+        String marker = "\"" + fieldName + "\":";
+        int start = text.indexOf(marker);
+        if (start < 0) {
+            return null;
+        }
+        start += marker.length();
+        while (start < text.length() && Character.isWhitespace(text.charAt(start))) {
+            start++;
+        }
+        int end = start;
+        while (end < text.length() && Character.isDigit(text.charAt(end))) {
+            end++;
+        }
+        if (end == start) {
+            return null;
+        }
+        return Integer.parseInt(text.substring(start, end));
+    }
+
+    private static String joinMessages(List<LlmMessage> messages) {
+        StringBuilder out = new StringBuilder();
+        for (LlmMessage message : messages) {
+            if (out.length() > 0) {
+                out.append('\n');
+            }
+            out.append(message.role()).append(": ").append(message.content());
+        }
+        return out.toString();
+    }
+
+    protected static int estimateTokens(String text) {
+        String value = text == null ? "" : text;
+        if (value.isBlank()) {
+            return 0;
+        }
+        return Math.max(1, (int) Math.ceil(value.length() / 4.0));
     }
 }

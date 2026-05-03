@@ -1,0 +1,6 @@
+ideal_customer_profile.md
+pain_points.md
+buyer_signals.md
+disqualifiers.md
+product_claims.md
+sales_patterns.md

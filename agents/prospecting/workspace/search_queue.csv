@@ -1,0 +1,5 @@
+id,query_template,region,city,industry,pass,status,last_run,next_run,results_seen,notes
+"1","tube fabrication shop","British Columbia","Vancouver","off-road fabrication","2","active","2026-05-02","2026-05-03","0","Start with larger metro areas and repeated tube-work signals."
+"2","roll cage builder","British Columbia","Kelowna","motorsport fabrication","2","active","2026-05-02","2026-05-03","0","Look for public contact pages and fabrication gallery evidence."
+"3","welded tube frame manufacturer","Alberta","Calgary","metal fabrication","2","active","2026-05-02","2026-05-03","0","Focus on companies with production or contract manufacturing indicators."
+"4","tube chassis builder","British Columbia","Surrey","off-road fabrication","1","active","","2026-05-02","0","Expand beyond Vancouver core"

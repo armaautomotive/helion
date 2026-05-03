@@ -10,13 +10,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public final class HttpBrowserTool implements BrowserTool {
-    private static final Pattern RESULT_PATTERN = Pattern.compile(
-            "(?is)<a[^>]*class=\"[^\"]*result__a[^\"]*\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>(.*?)(?:</article>|<div class=\"result__extras\")");
-    private static final Pattern TITLE_PATTERN = Pattern.compile("(?is)<title>(.*?)</title>");
     private final HttpClient httpClient;
     private final int defaultLimit;
     private final int fetchCharLimit;
@@ -50,15 +45,7 @@ public final class HttpBrowserTool implements BrowserTool {
         }
 
         List<SearchResultItem> items = new ArrayList<>();
-        Matcher matcher = RESULT_PATTERN.matcher(response.body());
-        while (matcher.find() && items.size() < actualLimit) {
-            String href = normalizeDuckDuckGoUrl(matcher.group(1));
-            String title = TextUtils.stripHtml(matcher.group(2));
-            String snippet = TextUtils.limit(TextUtils.stripHtml(matcher.group(3)), 240);
-            if (!href.isBlank() && !title.isBlank()) {
-                items.add(new SearchResultItem(title, href, snippet));
-            }
-        }
+        extractDuckDuckGoResults(response.body(), actualLimit, items);
 
         String note = items.isEmpty() ? "No parsed results from DuckDuckGo HTML response." : "";
         return new BrowserSearchResult(query, items, note);
@@ -78,11 +65,7 @@ public final class HttpBrowserTool implements BrowserTool {
         }
 
         String html = response.body();
-        String title = "";
-        Matcher titleMatcher = TITLE_PATTERN.matcher(html);
-        if (titleMatcher.find()) {
-            title = TextUtils.stripHtml(titleMatcher.group(1));
-        }
+        String title = extractTitle(html);
         String content = TextUtils.limit(TextUtils.stripHtml(html), fetchCharLimit);
         return new BrowserPage(url, title, content, "Fetched from live web content.");
     }
@@ -98,5 +81,80 @@ public final class HttpBrowserTool implements BrowserTool {
         int end = href.indexOf('&', start);
         String encoded = end >= 0 ? href.substring(start + 5, end) : href.substring(start + 5);
         return TextUtils.decodeUrl(encoded);
+    }
+
+    private void extractDuckDuckGoResults(String html, int limit, List<SearchResultItem> items) {
+        String lower = html.toLowerCase();
+        int cursor = 0;
+        while (items.size() < limit) {
+            int classPos = lower.indexOf("result__a", cursor);
+            if (classPos < 0) {
+                break;
+            }
+            int tagStart = lower.lastIndexOf("<a", classPos);
+            int tagEnd = lower.indexOf('>', classPos);
+            if (tagStart < 0 || tagEnd < 0) {
+                break;
+            }
+            String anchorTag = html.substring(tagStart, tagEnd + 1);
+            String href = extractAttribute(anchorTag, "href");
+            int closeTag = lower.indexOf("</a>", tagEnd);
+            if (closeTag < 0) {
+                break;
+            }
+            String titleHtml = html.substring(tagEnd + 1, closeTag);
+            int snippetEnd = lower.indexOf("</article>", closeTag);
+            if (snippetEnd < 0) {
+                int fallback = lower.indexOf("result__extras", closeTag);
+                snippetEnd = fallback < 0 ? Math.min(html.length(), closeTag + 600) : fallback;
+            }
+            String snippetHtml = html.substring(closeTag + 4, Math.min(snippetEnd, html.length()));
+            String title = TextUtils.stripHtml(titleHtml);
+            String snippet = TextUtils.limit(TextUtils.stripHtml(snippetHtml), 240);
+            String normalizedHref = normalizeDuckDuckGoUrl(href);
+            if (!normalizedHref.isBlank() && !title.isBlank()) {
+                items.add(new SearchResultItem(title, normalizedHref, snippet));
+            }
+            cursor = closeTag + 4;
+        }
+    }
+
+    private String extractTitle(String html) {
+        String lower = html.toLowerCase();
+        int start = lower.indexOf("<title>");
+        if (start < 0) {
+            return "";
+        }
+        int end = lower.indexOf("</title>", start);
+        if (end < 0) {
+            return "";
+        }
+        return TextUtils.stripHtml(html.substring(start + 7, end));
+    }
+
+    private String extractAttribute(String tag, String attribute) {
+        String lower = tag.toLowerCase();
+        String marker = attribute.toLowerCase() + "=";
+        int start = lower.indexOf(marker);
+        if (start < 0) {
+            return "";
+        }
+        int valueStart = start + marker.length();
+        if (valueStart >= tag.length()) {
+            return "";
+        }
+        char quote = tag.charAt(valueStart);
+        if (quote == '"' || quote == '\'') {
+            int end = tag.indexOf(quote, valueStart + 1);
+            if (end > valueStart) {
+                return tag.substring(valueStart + 1, end);
+            }
+            return "";
+        }
+        int end = valueStart;
+        while (end < tag.length() && !Character.isWhitespace(tag.charAt(end)) && tag.charAt(end) != '>') {
+            end++;
+        }
+        return tag.substring(valueStart, end);
     }
 }

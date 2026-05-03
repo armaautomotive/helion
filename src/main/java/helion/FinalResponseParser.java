@@ -57,18 +57,52 @@ public final class FinalResponseParser {
             return List.of();
         }
         List<String> lines = new ArrayList<>();
-        for (String line : block.split("\\R")) {
+        for (String line : splitLines(block)) {
             String trimmed = line.trim();
             if (trimmed.isEmpty()) {
                 continue;
             }
             if (trimmed.startsWith("-")) {
                 trimmed = trimmed.substring(1).trim();
-            } else if (trimmed.matches("\\d+\\.\\s+.*")) {
-                trimmed = trimmed.replaceFirst("^\\d+\\.\\s+", "");
+            } else {
+                trimmed = stripNumberedPrefix(trimmed);
             }
             lines.add(trimmed);
         }
         return lines;
+    }
+
+    private static List<String> splitLines(String text) {
+        List<String> lines = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\r') {
+                continue;
+            }
+            if (c == '\n') {
+                lines.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+        lines.add(current.toString());
+        return lines;
+    }
+
+    private static String stripNumberedPrefix(String value) {
+        int i = 0;
+        while (i < value.length() && Character.isDigit(value.charAt(i))) {
+            i++;
+        }
+        if (i == 0 || i >= value.length() || value.charAt(i) != '.') {
+            return value;
+        }
+        int next = i + 1;
+        while (next < value.length() && Character.isWhitespace(value.charAt(next))) {
+            next++;
+        }
+        return next < value.length() ? value.substring(next) : value;
     }
 }
