@@ -134,6 +134,10 @@ public final class Helion {
                 printEmailConfig(agent);
                 continue;
             }
+            if ("/emailsync".equalsIgnoreCase(input)) {
+                syncEmailInbox(agentRegistry, agent, currentAgent);
+                continue;
+            }
             if (input.toLowerCase().startsWith("/draftemail ")) {
                 saveDraftEmail(agentRegistry, agent, currentAgent, input.substring("/draftemail ".length()).trim());
                 continue;
@@ -229,6 +233,7 @@ public final class Helion {
         System.out.println("/queue add <query template> | <region> | <city> | <industry> | <notes>  Add a queued prospect search");
         System.out.println("/usage  Show per-model usage stats");
         System.out.println("/emailconfig  Show configured email transport settings");
+        System.out.println("/emailsync  Run a read-only IMAP inbox sync for the current agent");
         System.out.println("/draftemail <to> | <subject> | <body>  Save a draft email in the current agent workspace");
         System.out.println("/openweb  Start the local web UI if needed and open it in the default browser");
         System.out.println("/company  List company data directories");
@@ -292,6 +297,22 @@ public final class Helion {
     private static void printEmailConfig(BusinessAgent agent) {
         System.out.println(Ansi.bold("Email configuration:"));
         System.out.println(agent.emailConfigReport());
+    }
+
+    private static void syncEmailInbox(AgentRegistry agentRegistry, BusinessAgent agent, String currentAgent) throws IOException {
+        if (currentAgent == null || currentAgent.isBlank()) {
+            System.out.println(Ansi.yellow("Select an agent first with /agent <id>."));
+            return;
+        }
+        if (agentRegistry.load(currentAgent) == null) {
+            System.out.println(Ansi.yellow("Unknown agent: " + currentAgent));
+            return;
+        }
+        try {
+            System.out.println(Ansi.green(agent.syncEmailInbox(currentAgent, 8)));
+        } catch (Exception ex) {
+            System.out.println(Ansi.red("Email sync failed: " + ex.getMessage()));
+        }
     }
 
     private static void runDistill(BusinessAgent agent, String agentId) {

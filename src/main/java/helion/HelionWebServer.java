@@ -75,6 +75,7 @@ public final class HelionWebServer {
                         .append("\"id\":\"").append(TextUtils.escapeJson(ids.get(i))).append("\",")
                         .append("\"runState\":\"").append(TextUtils.escapeJson(status.runState())).append("\",")
                         .append("\"executionTarget\":\"").append(TextUtils.escapeJson(status.executionTarget())).append("\",")
+                        .append("\"preferredLocalPool\":\"").append(TextUtils.escapeJson(status.preferredLocalPool())).append("\",")
                         .append("\"runtimeState\":\"").append(TextUtils.escapeJson(runtime.runtimeState())).append("\",")
                         .append("\"consecutiveFailures\":").append(runtime.consecutiveFailures()).append(',')
                         .append("\"totalSuccesses\":").append(runtime.totalSuccesses()).append(',')
@@ -127,7 +128,10 @@ public final class HelionWebServer {
                     + "\"status\":\"" + TextUtils.escapeJson(status.renderedStatus()) + "\","
                     + "\"runState\":\"" + TextUtils.escapeJson(status.runState()) + "\","
                     + "\"executionTarget\":\"" + TextUtils.escapeJson(status.executionTarget()) + "\","
+                    + "\"preferredLocalPool\":\"" + TextUtils.escapeJson(status.preferredLocalPool()) + "\","
                     + "\"primaryOutputFile\":\"" + TextUtils.escapeJson(status.primaryOutputFile()) + "\","
+                    + "\"defaultLocalPool\":\"" + TextUtils.escapeJson(config.defaultLocalPool()) + "\","
+                    + "\"localPools\":" + renderLocalPoolsJson() + ","
                     + "\"runtime\":\"" + TextUtils.escapeJson(runtime.render()) + "\","
                     + "\"distilled\":\"" + TextUtils.escapeJson(distilled) + "\","
                     + "\"workspace\":\"" + TextUtils.escapeJson(workspace) + "\""
@@ -194,19 +198,36 @@ public final class HelionWebServer {
             Map<String, String> body = parseJsonObject(readBody(exchange));
             String runState = body.getOrDefault("runState", "").trim();
             String executionTarget = body.getOrDefault("executionTarget", "").trim();
+            String preferredLocalPool = body.getOrDefault("preferredLocalPool", "").trim();
             int runIntervalSeconds = parsePositiveInt(body.getOrDefault("runIntervalSeconds", ""), 300);
             String primaryOutputFile = body.getOrDefault("primaryOutputFile", "").trim();
-            new AgentStatusStore(config).updateSettings(profile, runState, executionTarget, runIntervalSeconds, primaryOutputFile);
+            new AgentStatusStore(config).updateSettings(profile, runState, executionTarget, preferredLocalPool, runIntervalSeconds, primaryOutputFile);
             AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
             String json = "{"
                     + "\"saved\":true,"
                     + "\"runState\":\"" + TextUtils.escapeJson(status.runState()) + "\","
                     + "\"executionTarget\":\"" + TextUtils.escapeJson(status.executionTarget()) + "\","
+                    + "\"preferredLocalPool\":\"" + TextUtils.escapeJson(status.preferredLocalPool()) + "\","
                     + "\"primaryOutputFile\":\"" + TextUtils.escapeJson(status.primaryOutputFile()) + "\","
                     + "\"runIntervalSeconds\":" + status.runIntervalSeconds()
                     + "}";
             sendJson(exchange, 200, json);
         }
+    }
+
+    private String renderLocalPoolsJson() {
+        StringBuilder json = new StringBuilder();
+        json.append('[');
+        List<LocalModelConfig> pools = config.localModelPools();
+        for (int i = 0; i < pools.size(); i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            LocalModelConfig pool = pools.get(i);
+            json.append('"').append(TextUtils.escapeJson(pool.poolName())).append('"');
+        }
+        json.append(']');
+        return json.toString();
     }
 
     private final class ActivityHandler implements HttpHandler {

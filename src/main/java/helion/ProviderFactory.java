@@ -28,12 +28,12 @@ public final class ProviderFactory {
     }
 
     public static WorkerPool createWorkers(HelionConfig config, UsageTracker usageTracker) {
-        List<LlmProvider> workers = new ArrayList<>();
-        int count = Math.max(1, config.workerCount());
-        for (int i = 0; i < count; i++) {
-            workers.add(createProvider(config.workerProvider(), config.workerModel(), config, usageTracker));
+        List<WorkerPool.PoolEntry> workers = new ArrayList<>();
+        for (LocalModelConfig pool : config.localModelPools()) {
+            LlmProvider provider = createProvider(pool.provider(), pool.model(), pool.baseUrl(), config, usageTracker);
+            workers.add(WorkerPool.entry(pool.poolName(), provider, pool.capacity()));
         }
-        return new WorkerPool(workers);
+        return new WorkerPool(workers, config.defaultLocalPool());
     }
 
     public static BrowserTool createBrowserTool(HelionConfig config) {
@@ -84,12 +84,16 @@ public final class ProviderFactory {
     }
 
     private static LlmProvider createProvider(String providerName, String model, HelionConfig config, UsageTracker usageTracker) {
+        return createProvider(providerName, model, config.llamaCppBaseUrl(), config, usageTracker);
+    }
+
+    private static LlmProvider createProvider(String providerName, String model, String baseUrl, HelionConfig config, UsageTracker usageTracker) {
         String provider = providerName == null ? "" : providerName.trim().toLowerCase();
         LlmProvider base;
         if ("openai".equals(provider) && !config.openAiApiKey().isBlank()) {
             base = new OpenAiProvider(config.openAiApiKey(), model);
         } else if ("llama.cpp".equals(provider) || "llamacpp".equals(provider) || "llama".equals(provider)) {
-            base = new LlamaCppProvider(config.llamaCppBaseUrl(), model);
+            base = new LlamaCppProvider(baseUrl, model);
         } else {
             base = new DemoBusinessProvider();
         }

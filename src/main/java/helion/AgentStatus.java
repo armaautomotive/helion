@@ -5,6 +5,7 @@ import java.time.LocalDateTime;
 public record AgentStatus(
         String runState,
         String executionTarget,
+        String preferredLocalPool,
         int runIntervalSeconds,
         LocalDateTime lastRun,
         String primaryOutputFile,
@@ -14,22 +15,13 @@ public record AgentStatus(
 
     public static AgentStatus parse(String rawStatus, HelionConfig config) {
         String text = rawStatus == null ? "" : rawStatus.trim();
-        String runState = firstMatchingValue(text, "Run state:");
-        String executionTarget = firstMatchingValue(text, "Execution target:");
-        if (runState.isBlank()) {
-            runState = "running";
-        } else {
-            runState = normalizeRunState(runState);
-        }
-        if (executionTarget.isBlank()) {
-            executionTarget = inferExecutionTargetFromConfig(config);
-        } else {
-            executionTarget = normalizeExecutionTarget(executionTarget, config);
-        }
+        String runState = normalizeRunState(firstMatchingValue(text, "Run state:"));
+        String executionTarget = normalizeExecutionTarget(firstMatchingValue(text, "Execution target:"), config);
+        String preferredLocalPool = normalizePreferredLocalPool(firstMatchingValue(text, "Preferred local pool:"), config);
         int runIntervalSeconds = parsePositiveInt(firstMatchingValue(text, "Run interval seconds:"), DEFAULT_RUN_INTERVAL_SECONDS);
         LocalDateTime lastRun = parseDateTime(firstMatchingValue(text, "Last run:"));
         String primaryOutputFile = normalizeOutputFile(firstMatchingValue(text, "Primary output file:"));
-        return new AgentStatus(runState, executionTarget, runIntervalSeconds, lastRun, primaryOutputFile, text);
+        return new AgentStatus(runState, executionTarget, preferredLocalPool, runIntervalSeconds, lastRun, primaryOutputFile, text);
     }
 
     public static String inferExecutionTargetFromConfig(HelionConfig config) {
@@ -37,9 +29,6 @@ public record AgentStatus(
         String worker = config.workerProvider() == null ? "" : config.workerProvider().trim().toLowerCase();
         if (isCloudProvider(manager) || isCloudProvider(worker)) {
             return "cloud";
-        }
-        if (isLocalProvider(manager) || isLocalProvider(worker)) {
-            return "local";
         }
         return "local";
     }
@@ -53,21 +42,15 @@ public record AgentStatus(
             return generatedStatus();
         }
         StringBuilder out = new StringBuilder(rawText);
-        if (!rawText.toLowerCase().contains("run state:")) {
-            out.insert(0, "Run state: " + runState + "\n");
+        ensureLine(out, "Run state:", runState);
+        ensureLine(out, "Execution target:", executionTarget);
+        ensureLine(out, "Preferred local pool:", preferredLocalPool);
+        ensureLine(out, "Run interval seconds:", Integer.toString(runIntervalSeconds));
+        if (!primaryOutputFile.isBlank()) {
+            ensureLine(out, "Primary output file:", primaryOutputFile);
         }
-        if (!out.toString().toLowerCase().contains("execution target:")) {
-            int insertAt = out.toString().toLowerCase().contains("run state:") ? out.indexOf("\n") + 1 : 0;
-            out.insert(insertAt, "Execution target: " + executionTarget + "\n");
-        }
-        if (!rawText.toLowerCase().contains("run interval seconds:")) {
-            out.append("\n\nRun interval seconds: ").append(runIntervalSeconds);
-        }
-        if (!out.toString().toLowerCase().contains("primary output file:") && !primaryOutputFile.isBlank()) {
-            out.append("\nPrimary output file: ").append(primaryOutputFile);
-        }
-        if (lastRun != null && !rawText.toLowerCase().contains("last run:")) {
-            out.append("\nLast run: ").append(lastRun);
+        if (lastRun != null) {
+            ensureLine(out, "Last run:", lastRun.toString());
         }
         return out.toString().trim();
     }
@@ -76,20 +59,28 @@ public record AgentStatus(
         String base = rawText == null ? "" : rawText;
         String updated = replaceOrAppendLine(base, "Run state:", runState);
         updated = replaceOrAppendLine(updated, "Execution target:", executionTarget);
+        updated = replaceOrAppendLine(updated, "Preferred local pool:", preferredLocalPool);
         updated = replaceOrAppendLine(updated, "Run interval seconds:", Integer.toString(runIntervalSeconds));
         updated = replaceOrAppendLine(updated, "Primary output file:", primaryOutputFile);
         updated = replaceOrAppendLine(updated, "Last run:", when.toString());
         return updated.trim();
     }
 
-    public String withSettingsText(String nextRunState, String nextExecutionTarget, int nextRunIntervalSeconds, String nextPrimaryOutputFile) {
+    public String withSettingsText(
+            String nextRunState,
+            String nextExecutionTarget,
+            String nextPreferredLocalPool,
+            int nextRunIntervalSeconds,
+            String nextPrimaryOutputFile) {
         String normalizedState = normalizeRunState(nextRunState);
         String normalizedTarget = normalizeExecutionTarget(nextExecutionTarget, null);
+        String normalizedPool = normalizePreferredLocalPool(nextPreferredLocalPool, null);
         int interval = nextRunIntervalSeconds > 0 ? nextRunIntervalSeconds : DEFAULT_RUN_INTERVAL_SECONDS;
         String outputFile = normalizeOutputFile(nextPrimaryOutputFile);
         String base = rawText == null ? "" : rawText;
         String updated = replaceOrAppendLine(base, "Run state:", normalizedState);
         updated = replaceOrAppendLine(updated, "Execution target:", normalizedTarget);
+        updated = replaceOrAppendLine(updated, "Preferred local pool:", normalizedPool);
         updated = replaceOrAppendLine(updated, "Run interval seconds:", Integer.toString(interval));
         updated = replaceOrAppendLine(updated, "Primary output file:", outputFile);
         return updated.trim();
@@ -99,28 +90,34 @@ public record AgentStatus(
         StringBuilder out = new StringBuilder();
         out.append("Run state: ").append(runState).append('\n');
         out.append("Execution target: ").append(executionTarget).append('\n');
-        out.append("Run interval seconds: ").append(runIntervalSeconds);
+        out.append("Preferred local pool: ").append(preferredLocalPool).append('\n');
+        out.append("Run interval seconds: ").append(runIntervalSeconds).append('\n');
         if (!primaryOutputFile.isBlank()) {
-            out.append('\n').append("Primary output file: ").append(primaryOutputFile);
+            out.append("Primary output file: ").append(primaryOutputFile).append('\n');
         }
         if (lastRun != null) {
-            out.append('\n').append("Last run: ").append(lastRun);
+            out.append("Last run: ").append(lastRun).append('\n');
         }
-        return out.toString();
+        return out.toString().trim();
     }
 
-    private static String firstMatchingValue(String text, String... labels) {
-        for (String label : labels) {
-            String value = valueAfter(text, label);
-            if (!value.isBlank()) {
-                return value;
+    private static void ensureLine(StringBuilder text, String label, String value) {
+        String lower = text.toString().toLowerCase();
+        if (!lower.contains(label.toLowerCase())) {
+            if (text.length() > 0 && text.charAt(text.length() - 1) != '\n') {
+                text.append('\n');
             }
+            text.append(label).append(' ').append(value);
         }
-        return "";
     }
 
-    private static String valueAfter(String text, String label) {
-        int start = text.toLowerCase().indexOf(label.toLowerCase());
+    private static String firstMatchingValue(String text, String label) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        String lower = text.toLowerCase();
+        String marker = label.toLowerCase();
+        int start = lower.indexOf(marker);
         if (start < 0) {
             return "";
         }
@@ -170,19 +167,30 @@ public record AgentStatus(
     }
 
     private static String normalizeRunState(String value) {
-        String normalized = value.trim().toLowerCase();
+        String normalized = value == null ? "" : value.trim().toLowerCase();
         return switch (normalized) {
-            case "running", "paused", "disabled" -> normalized;
+            case "paused", "disabled" -> normalized;
             default -> "running";
         };
     }
 
     private static String normalizeExecutionTarget(String value, HelionConfig config) {
-        String normalized = value.trim().toLowerCase();
+        String normalized = value == null ? "" : value.trim().toLowerCase();
         return switch (normalized) {
             case "cloud", "local" -> normalized;
             default -> config == null ? "local" : inferExecutionTargetFromConfig(config);
         };
+    }
+
+    private static String normalizePreferredLocalPool(String value, HelionConfig config) {
+        String normalized = value == null ? "" : value.trim().toLowerCase();
+        if (!normalized.isBlank()) {
+            return normalized;
+        }
+        if (config != null && config.defaultLocalPool() != null && !config.defaultLocalPool().isBlank()) {
+            return config.defaultLocalPool().trim().toLowerCase();
+        }
+        return "default";
     }
 
     private static String normalizeOutputFile(String value) {
@@ -204,9 +212,5 @@ public record AgentStatus(
 
     private static boolean isCloudProvider(String provider) {
         return "openai".equals(provider);
-    }
-
-    private static boolean isLocalProvider(String provider) {
-        return "llama.cpp".equals(provider) || "llamacpp".equals(provider) || "llama".equals(provider) || "demo".equals(provider);
     }
 }

@@ -1,0 +1,5 @@
+id,site,topic,audience,query_template,pass,status,last_run,next_run,results_seen,notes
+"1","reddit.com","tube notcher advice","fabricators","\"tube notcher\" OR \"tube notching\"","1","active","","","0","Start with direct tube notcher discussions on Reddit."
+"2","reddit.com","roll cage fabrication pain","off-road builders","\"roll cage\" fabrication question","1","active","","","0","Look for repeated coping/notching pain in cage-building threads."
+"3","reddit.com","tube chassis workflow","motorsport fabricators","\"tube chassis\" fabrication workflow","1","active","","","0","Find conversations about speed, repeatability, or shop bottlenecks."
+"4","reddit.com","shop tooling recommendations","small fab shops","fabrication tool recommendation tubing","1","active","","","0","Find public recommendation threads where the product could be relevant."

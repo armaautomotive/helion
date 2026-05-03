@@ -555,6 +555,12 @@ public final class HelionWebUi {
                             </div>
                             <div class="editor-box compact">
                               <div class="editor-title">
+                                <strong>Preferred Local Pool</strong>
+                              </div>
+                              <select id="preferredLocalPoolSelect"></select>
+                            </div>
+                            <div class="editor-box compact">
+                              <div class="editor-title">
                                 <strong>Primary Output File</strong>
                               </div>
                               <input id="primaryOutputFileInput" type="text" placeholder="workspace/prospects.md">
@@ -713,6 +719,7 @@ public final class HelionWebUi {
                       const runStateSelect = document.getElementById("runStateSelect");
                       const executionTargetSelect = document.getElementById("executionTargetSelect");
                       const runIntervalInput = document.getElementById("runIntervalInput");
+                      const preferredLocalPoolSelect = document.getElementById("preferredLocalPoolSelect");
                       const primaryOutputFileInput = document.getElementById("primaryOutputFileInput");
                       const settingsHelp = document.getElementById("settingsHelp");
                       const roleHelp = document.getElementById("roleHelp");
@@ -725,6 +732,8 @@ public final class HelionWebUi {
                         runStateSelect.value = "running";
                         executionTargetSelect.value = "local";
                         runIntervalInput.value = "";
+                        preferredLocalPoolSelect.innerHTML = "<option value='default'>default</option>";
+                        preferredLocalPoolSelect.value = "default";
                         primaryOutputFileInput.value = "";
                         runStateBadge.textContent = "run state unknown";
                         settingsHelp.textContent = "Agent settings control whether autonomous work runs and how often the supervisor checks this agent.";
@@ -738,12 +747,24 @@ public final class HelionWebUi {
                       runStateSelect.value = currentAgentDetails.runState || "running";
                       executionTargetSelect.value = currentAgentDetails.executionTarget || "local";
                       runIntervalInput.value = readRunInterval(currentAgentDetails.status || "") || "";
+                      const localPools = (currentAgentDetails.localPools && currentAgentDetails.localPools.length)
+                        ? currentAgentDetails.localPools
+                        : [currentAgentDetails.defaultLocalPool || "default"];
+                      preferredLocalPoolSelect.innerHTML = "";
+                      localPools.forEach(poolName => {
+                        const option = document.createElement("option");
+                        option.value = poolName;
+                        option.textContent = poolName;
+                        preferredLocalPoolSelect.appendChild(option);
+                      });
+                      preferredLocalPoolSelect.value = currentAgentDetails.preferredLocalPool || currentAgentDetails.defaultLocalPool || "default";
                       primaryOutputFileInput.value = currentAgentDetails.primaryOutputFile || "";
                       runStateBadge.textContent = "run state " + (currentAgentDetails.runState || "running");
                       runStateBadge.className = "badge run-" + (currentAgentDetails.runState || "running");
                       settingsHelp.textContent =
                         "Current run state: " + (currentAgentDetails.runState || "running") +
                         "\\nExecution target: " + (currentAgentDetails.executionTarget || "local") +
+                        "\\nPreferred local pool: " + (currentAgentDetails.preferredLocalPool || currentAgentDetails.defaultLocalPool || "default") +
                         "\\nCurrent interval: " + (runIntervalInput.value || "300") + " seconds" +
                         "\\nPrimary output: " + (currentAgentDetails.primaryOutputFile || "(none)");
                       roleHelp.textContent =
@@ -1324,10 +1345,11 @@ public final class HelionWebUi {
                       const runState = document.getElementById("runStateSelect").value;
                       const executionTarget = document.getElementById("executionTargetSelect").value;
                       const runIntervalSeconds = document.getElementById("runIntervalInput").value.trim() || "300";
+                      const preferredLocalPool = document.getElementById("preferredLocalPoolSelect").value || "default";
                       const primaryOutputFile = document.getElementById("primaryOutputFileInput").value.trim();
                       await api("/api/agent-settings?id=" + encodeURIComponent(currentAgent), {
                         method: "PUT",
-                        body: JSON.stringify({ runState, executionTarget, runIntervalSeconds, primaryOutputFile })
+                        body: JSON.stringify({ runState, executionTarget, preferredLocalPool, runIntervalSeconds, primaryOutputFile })
                       });
                       setFlash("Saved agent settings.");
                       const details = await api("/api/agent?id=" + encodeURIComponent(currentAgent));
@@ -1344,11 +1366,12 @@ public final class HelionWebUi {
                         return;
                       }
                       const executionTarget = currentAgentDetails.executionTarget || document.getElementById("executionTargetSelect").value || "local";
+                      const preferredLocalPool = currentAgentDetails.preferredLocalPool || document.getElementById("preferredLocalPoolSelect").value || "default";
                       const runIntervalSeconds = readRunInterval(currentAgentDetails.status || "") || document.getElementById("runIntervalInput").value.trim() || "300";
                       const primaryOutputFile = currentAgentDetails.primaryOutputFile || document.getElementById("primaryOutputFileInput").value.trim() || "";
                       await api("/api/agent-settings?id=" + encodeURIComponent(currentAgent), {
                         method: "PUT",
-                        body: JSON.stringify({ runState, executionTarget, runIntervalSeconds, primaryOutputFile })
+                        body: JSON.stringify({ runState, executionTarget, preferredLocalPool, runIntervalSeconds, primaryOutputFile })
                       });
                       const details = await api("/api/agent?id=" + encodeURIComponent(currentAgent));
                       currentAgentDetails = details;

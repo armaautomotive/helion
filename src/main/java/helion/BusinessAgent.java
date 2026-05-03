@@ -19,8 +19,11 @@ public final class BusinessAgent {
     private final AgentDistiller distiller;
     private final MemoryStore memoryStore;
     private final EmailDraftStore emailDraftStore;
+    private final EmailInboxStore emailInboxStore;
     private final ProspectStore prospectStore;
     private final ProspectSearchQueueStore prospectSearchQueueStore;
+    private final SocialOpportunityStore socialOpportunityStore;
+    private final SocialSearchQueueStore socialSearchQueueStore;
     private final HelionConfig config;
 
     public BusinessAgent(LlmProvider manager, WorkerPool workerPool, BrowserTool browserTool, KnowledgeBase knowledgeBase, MultiDirectoryCorpus companyDataCorpus, CompanyDataSources companyDataSources, AgentRegistry agentRegistry, UsageTracker usageTracker, MemoryStore memoryStore, EmailDraftStore emailDraftStore, HelionConfig config) {
@@ -35,8 +38,11 @@ public final class BusinessAgent {
         this.distiller = new AgentDistiller(manager, knowledgeBase, companyDataCorpus);
         this.memoryStore = memoryStore;
         this.emailDraftStore = emailDraftStore;
+        this.emailInboxStore = new EmailInboxStore(config.emailSettings(), agentRegistry);
         this.prospectStore = new ProspectStore(agentRegistry, config);
         this.prospectSearchQueueStore = new ProspectSearchQueueStore(agentRegistry);
+        this.socialOpportunityStore = new SocialOpportunityStore(agentRegistry, config);
+        this.socialSearchQueueStore = new SocialSearchQueueStore(agentRegistry);
         this.config = config;
     }
 
@@ -290,6 +296,73 @@ public final class BusinessAgent {
         return prompt.toString().trim();
     }
 
+    private String buildSocialMediaSystemPrompt(int count) {
+        return """
+                You are Helion running a social-media opportunity discovery workflow.
+                Your job is to find public social or forum conversations where Arma Automotive's CNC tube notcher could be relevant.
+
+                Focus on public indexed pages first, especially Reddit and public forums. Do not invent conversations.
+
+                ACTION: WORKER
+                TITLE: short label
+                PROMPT:
+                detailed worker task
+
+                ACTION: SEARCH
+                QUERY: search terms
+                LIMIT: 10
+
+                ACTION: FETCH
+                URL: https://example.com/thread
+
+                ACTION: FINAL
+                CONTENT:
+                OPPORTUNITY:
+                Title: thread title
+                URL: https://thread.example
+                Site: reddit.com
+                Community: subreddit/forum name or blank
+                Author: public handle or blank
+                Posted: public date or blank
+                Relevance: high|medium|low
+                Buyer Signal: one concise explanation of why this looks like a fit
+                Product Fit: one concise explanation of how the CNC tube notcher fits
+                Recommended Angle: one concise non-spam reply or outreach angle
+                Evidence: one concise evidence summary from the public thread or snippet
+                Status: new
+                Tags:
+                - reddit
+                - fabrication
+                Source URLs:
+                - https://thread.example
+                <<<END_OPPORTUNITY>>>
+
+                Rules:
+                - Return about %d opportunities.
+                - Use public conversation URLs and snippets as grounding.
+                - Prefer threads about tube notching, tube coping, roll cages, tube chassis, fabrication bottlenecks, or tool recommendations.
+                - Do not invent authors, communities, or dates if they are not visible.
+                - Treat the social-media agent's primary output file as the main deliverable this workflow is updating.
+                - Do not include commentary outside action blocks.
+                """.formatted(Math.max(1, count));
+    }
+
+    private String buildSocialMediaUserPrompt(String searchFocus, int count, List<ToolObservation> observations, int turn) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("Social opportunity objective:\n");
+        prompt.append(searchFocus).append('\n').append('\n');
+        prompt.append("Target number of opportunities: ").append(Math.max(1, count)).append('\n');
+        prompt.append("Turn: ").append(turn).append(" / ").append(config.maxTurns()).append('\n');
+        prompt.append("Browser enabled: ").append(browserTool.isEnabled()).append('\n');
+        prompt.append('\n');
+        prompt.append("Observations\n");
+        for (int i = 0; i < observations.size(); i++) {
+            prompt.append("Observation ").append(i + 1).append(":\n");
+            prompt.append(observations.get(i).render()).append('\n').append('\n');
+        }
+        return prompt.toString().trim();
+    }
+
     private ToolObservation runWorker(WorkerAction action, AgentRequest request) throws IOException, InterruptedException {
         String workerPrompt = """
                 Original business request:
@@ -300,7 +373,7 @@ public final class BusinessAgent {
 
                 Return concise, high-signal findings only. State assumptions when necessary.
                 """.formatted(request.prompt(), action.prompt());
-        String result = workerPool.run(action.title(), workerPrompt);
+        String result = workerPool.run(action.title(), workerPrompt, preferredLocalPool(request.agentId()));
         return new ToolObservation("worker", action.title(), result);
     }
 
@@ -423,6 +496,41 @@ public final class BusinessAgent {
         return emailDraftStore.saveDraft(agentId, to, subject, body, notes);
     }
 
+    public String syncEmailInbox(String agentId, int limit) throws IOException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            throw new IllegalArgumentException("Unknown agent: " + agentId);
+        }
+        AgentActivityStore activityStore = new AgentActivityStore();
+        logAgentActivity(
+                activityStore,
+                profile,
+                "info",
+                "email-sync",
+                "Starting inbox sync",
+                "Agent: " + agentId + "\nLimit: " + Math.max(1, limit) + "\nIMAP host: " + nonBlank(config.emailSettings().imapHost()));
+        try {
+            String result = emailInboxStore.syncInbox(agentId, limit);
+            logAgentActivity(
+                    activityStore,
+                    profile,
+                    "success",
+                    "email-sync",
+                    "Inbox sync completed",
+                    result);
+            return result;
+        } catch (IOException ex) {
+            logAgentActivity(
+                    activityStore,
+                    profile,
+                    "error",
+                    "email-sync",
+                    "Inbox sync failed",
+                    "Agent: " + agentId + "\nLimit: " + Math.max(1, limit) + "\nIMAP host: " + nonBlank(config.emailSettings().imapHost()) + "\nError: " + nonBlank(ex.getMessage()));
+            throw ex;
+        }
+    }
+
     public String collectProspects(String agentId, String searchFocus, int count) throws IOException, InterruptedException {
         return collectProspects(agentId, searchFocus, count, "cloud");
     }
@@ -437,7 +545,7 @@ public final class BusinessAgent {
             return "Unknown agent: " + agentId;
         }
         AgentActivityStore activityStore = new AgentActivityStore();
-        LlmProvider autonomousProvider = autonomousProvider(executionTarget);
+        LlmProvider autonomousProvider = autonomousProvider(executionTarget, preferredLocalPool(agentId));
         if ("demo".equals(autonomousProvider.name())) {
             logAgentActivity(activityStore, profile, "info", "prospecting", "Demo mode prospecting run", "Search focus: " + searchFocus);
             List<ProspectRecord> demoRecords = List.of(
@@ -742,6 +850,170 @@ public final class BusinessAgent {
         return prospectSearchQueueStore.renderList(agentId);
     }
 
+    public String collectSocialOpportunities(String agentId, String searchFocus, int count, String executionTarget) throws IOException, InterruptedException {
+        return withUsageAgent(agentId, () -> collectSocialOpportunitiesInternal(agentId, searchFocus, count, executionTarget));
+    }
+
+    private String collectSocialOpportunitiesInternal(String agentId, String searchFocus, int count, String executionTarget) throws IOException, InterruptedException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return "Unknown agent: " + agentId;
+        }
+        AgentActivityStore activityStore = new AgentActivityStore();
+        LlmProvider autonomousProvider = autonomousProvider(executionTarget, preferredLocalPool(agentId));
+        List<ToolObservation> observations = new ArrayList<>();
+        AgentRequest request = new AgentRequest(AgentMode.ANALYZE, searchFocus, agentId);
+        observations.add(loadAgentContext(agentId));
+        observations.add(loadKnowledgeContext());
+        observations.add(loadCompanyDataContext());
+        boolean hasGroundedEvidence = false;
+
+        logAgentActivity(
+                activityStore,
+                profile,
+                "info",
+                "social-media",
+                "Started social opportunity workflow",
+                "Search focus: " + searchFocus + "\nExecution target: " + executionTarget + "\nRequested opportunity count: " + count);
+
+        for (int turn = 1; turn <= config.maxTurns(); turn++) {
+            ManagerAction action;
+            try {
+                action = ManagerActionParser.parse(
+                        autonomousProvider.complete(
+                                buildSocialMediaSystemPrompt(count),
+                                buildSocialMediaUserPrompt(searchFocus, count, observations, turn)));
+            } catch (IOException ex) {
+                logAgentActivity(activityStore, profile, "error", "llm", "Coordinator request failed",
+                        "Turn: " + turn + "\nProvider: " + autonomousProvider.name() + "\nError: " + nonBlank(ex.getMessage()));
+                throw ex;
+            }
+
+            logAgentActivity(
+                    activityStore,
+                    profile,
+                    "info",
+                    "social-turn",
+                    "Turn " + turn + " selected " + actionName(action),
+                    prospectingActionDetails(action));
+
+            switch (action) {
+                case FinalAction finalAction -> {
+                    List<SocialOpportunityRecord> records = SocialOpportunityParser.parse(finalAction.content());
+                    if (records.isEmpty()) {
+                        logAgentActivity(activityStore, profile, "error", "social-final", "No structured opportunities returned",
+                                TextUtils.limit(finalAction.content(), 1200));
+                        return "No structured social opportunities were returned.";
+                    }
+                    if (!hasGroundedEvidence) {
+                        logAgentActivity(activityStore, profile, "error", "social-final", "Blocked ungrounded social output",
+                                TextUtils.limit(finalAction.content(), 1200));
+                        return "Social-media produced ungrounded output without public search evidence. No opportunities were saved.";
+                    }
+                    List<SocialOpportunityRecord> groundedRecords = filterGroundedSocialOpportunities(records);
+                    if (groundedRecords.isEmpty()) {
+                        logAgentActivity(activityStore, profile, "error", "social-final", "Blocked social opportunities with no source URLs",
+                                TextUtils.limit(finalAction.content(), 1200));
+                        return "Social-media returned records without usable source URLs. No opportunities were saved.";
+                    }
+                    String saved = socialOpportunityStore.save(agentId, searchFocus, groundedRecords);
+                    logAgentActivity(activityStore, profile, "success", "social-final",
+                            "Saved " + groundedRecords.size() + " social opportunities",
+                            renderSocialOpportunitySummary(groundedRecords) + "\n\n" + saved);
+                    return saved;
+                }
+                case WorkerAction workerAction -> {
+                    try {
+                        ToolObservation workerObservation = runWorker(workerAction, request);
+                        observations.add(workerObservation);
+                        logAgentActivity(activityStore, profile, "info", "worker", "Worker completed: " + workerAction.title(),
+                                TextUtils.limit(workerObservation.content(), 2000));
+                    } catch (IOException ex) {
+                        logAgentActivity(activityStore, profile, "error", "worker", "Worker action failed: " + workerAction.title(),
+                                "Turn: " + turn + "\nError: " + nonBlank(ex.getMessage()));
+                        throw ex;
+                    }
+                }
+                case SearchAction searchAction -> {
+                    BrowserSearchResult result;
+                    try {
+                        result = browserTool.search(searchAction.query(), searchAction.limit());
+                    } catch (IOException ex) {
+                        logAgentActivity(activityStore, profile, "error", "search", "Browser search failed",
+                                "Turn: " + turn + "\nQuery: " + searchAction.query() + "\nError: " + nonBlank(ex.getMessage()));
+                        throw ex;
+                    }
+                    observations.add(new ToolObservation("search", searchAction.query(), result.render()));
+                    if (!result.items().isEmpty()) {
+                        hasGroundedEvidence = true;
+                    }
+                    logAgentActivity(activityStore, profile, "info", "search",
+                            "Found " + result.items().size() + " search results",
+                            renderSearchActivity(result));
+                }
+                case FetchAction fetchAction -> {
+                    BrowserPage page;
+                    try {
+                        page = browserTool.fetch(fetchAction.url());
+                    } catch (IOException ex) {
+                        logAgentActivity(activityStore, profile, "error", "fetch", "Browser fetch failed",
+                                "Turn: " + turn + "\nURL: " + fetchAction.url() + "\nError: " + nonBlank(ex.getMessage()));
+                        throw ex;
+                    }
+                    observations.add(new ToolObservation("fetch", fetchAction.url(), page.render()));
+                    if (!page.content().isBlank()) {
+                        hasGroundedEvidence = true;
+                    }
+                    logAgentActivity(activityStore, profile, "info", "fetch",
+                            "Investigating " + fetchAction.url(), renderFetchActivity(page));
+                }
+                case ReadMemoryAction readMemoryAction -> observations.add(runMemoryRead(readMemoryAction));
+                case WriteMemoryAction writeMemoryAction -> observations.add(runMemoryWrite(writeMemoryAction));
+            }
+        }
+
+        logAgentActivity(activityStore, profile, "error", "social-media", "Social-media turn limit reached",
+                "Search focus: " + searchFocus + "\nMax turns: " + config.maxTurns());
+        return "Social-media did not complete within " + config.maxTurns() + " turns.";
+    }
+
+    public String collectQueuedSocialOpportunitiesBatch(String agentId, int count, int maxItems, String executionTarget) throws IOException, InterruptedException {
+        List<SocialSearchQueueItem> dueItems = socialSearchQueueStore.dueItems(agentId, Math.max(1, maxItems));
+        if (dueItems.isEmpty()) {
+            return "";
+        }
+        int delaySeconds = queueDelaySeconds(agentId);
+        StringBuilder out = new StringBuilder();
+        int processed = 0;
+        for (SocialSearchQueueItem item : dueItems) {
+            if (processed > 0) {
+                out.append("\n\n");
+            }
+            String result = collectSocialOpportunities(agentId, item.effectiveQuery(), count, executionTarget);
+            int resultsSeen = extractSavedCount(result);
+            SocialSearchQueueItem updated = item.afterRun(item.resultsSeen() + resultsSeen, delaySeconds);
+            socialSearchQueueStore.markRun(agentId, updated);
+            out.append("Queue item ").append(item.id()).append(":\n");
+            out.append(result).append('\n');
+            out.append("Advanced: ").append(item.summaryLine()).append(" -> pass ").append(updated.pass());
+            processed++;
+        }
+        out.append("\n\nProcessed ").append(processed).append(" queued social search");
+        if (processed != 1) {
+            out.append("es");
+        }
+        out.append(".");
+        return out.toString().trim();
+    }
+
+    public String addSocialQueueItem(String agentId, String site, String topic, String audience, String queryTemplate, String notes) throws IOException {
+        return socialSearchQueueStore.add(agentId, site, topic, audience, queryTemplate, notes);
+    }
+
+    public String socialQueueReport(String agentId) throws IOException {
+        return socialSearchQueueStore.renderList(agentId);
+    }
+
     private int extractSavedCount(String result) {
         if (result == null || result.isBlank()) {
             return 0;
@@ -766,12 +1038,60 @@ public final class BusinessAgent {
         }
     }
 
-    private LlmProvider autonomousProvider(String executionTarget) {
+    private List<SocialOpportunityRecord> filterGroundedSocialOpportunities(List<SocialOpportunityRecord> records) {
+        List<SocialOpportunityRecord> grounded = new ArrayList<>();
+        for (SocialOpportunityRecord record : records) {
+            if (record == null || record.sourceUrls() == null || record.sourceUrls().isEmpty()) {
+                continue;
+            }
+            boolean hasUsableUrl = false;
+            for (String url : record.sourceUrls()) {
+                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                    hasUsableUrl = true;
+                    break;
+                }
+            }
+            if (hasUsableUrl) {
+                grounded.add(record);
+            }
+        }
+        return grounded;
+    }
+
+    private String renderSocialOpportunitySummary(List<SocialOpportunityRecord> records) {
+        StringBuilder out = new StringBuilder();
+        out.append("Parsed social opportunities: ").append(records.size()).append('\n');
+        for (SocialOpportunityRecord record : records) {
+            out.append('\n').append("- ").append(record.title().isBlank() ? "(untitled)" : record.title());
+            out.append(" | relevance: ").append(record.relevance().isBlank() ? "(unspecified)" : record.relevance());
+            out.append(" | site: ").append(record.site().isBlank() ? "(unknown)" : record.site());
+            out.append(" | community: ").append(record.community().isBlank() ? "(unknown)" : record.community());
+            out.append(" | url: ").append(record.url().isBlank() ? "(none)" : record.url());
+        }
+        return out.toString().trim();
+    }
+
+    private LlmProvider autonomousProvider(String executionTarget, String preferredLocalPool) {
         String target = executionTarget == null ? "" : executionTarget.trim().toLowerCase();
         if ("local".equals(target)) {
-            return workerPool.primaryWorker();
+            return workerPool.providerForPool(preferredLocalPool);
         }
         return manager;
+    }
+
+    private String preferredLocalPool(String agentId) throws IOException {
+        return readAgentStatus(agentId).preferredLocalPool();
+    }
+
+    private AgentStatus readAgentStatus(String agentId) throws IOException {
+        if (agentId == null || agentId.isBlank()) {
+            return AgentStatus.parse("", config);
+        }
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return AgentStatus.parse("", config);
+        }
+        return AgentStatus.parse(readIfExists(profile.statusFile()), config);
     }
 
     private int queueDelaySeconds(String agentId) throws IOException {
@@ -782,20 +1102,13 @@ public final class BusinessAgent {
         if (profile == null) {
             return 60;
         }
-        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+        AgentStatus status = readAgentStatus(profile.id());
         return Math.max(5, status.runIntervalSeconds());
     }
 
     private LlmProvider coordinatorProvider(String agentId) throws IOException {
-        if (agentId == null || agentId.isBlank()) {
-            return manager;
-        }
-        AgentProfile profile = agentRegistry.load(agentId);
-        if (profile == null) {
-            return manager;
-        }
-        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
-        return autonomousProvider(status.executionTarget());
+        AgentStatus status = readAgentStatus(agentId);
+        return autonomousProvider(status.executionTarget(), status.preferredLocalPool());
     }
 
     public String usageReport() throws IOException {

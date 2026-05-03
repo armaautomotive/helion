@@ -33,7 +33,13 @@ public final class AgentStatusStore {
                 StandardOpenOption.WRITE);
     }
 
-    public void updateSettings(AgentProfile profile, String runState, String executionTarget, int runIntervalSeconds, String primaryOutputFile) throws IOException {
+    public void updateSettings(
+            AgentProfile profile,
+            String runState,
+            String executionTarget,
+            String preferredLocalPool,
+            int runIntervalSeconds,
+            String primaryOutputFile) throws IOException {
         AgentStatus status = read(profile);
         Path file = profile.statusFile();
         if (file.getParent() != null) {
@@ -41,7 +47,7 @@ public final class AgentStatusStore {
         }
         Files.writeString(
                 file,
-                status.withSettingsText(runState, executionTarget, runIntervalSeconds, primaryOutputFile),
+                status.withSettingsText(runState, executionTarget, preferredLocalPool, runIntervalSeconds, primaryOutputFile),
                 StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING,

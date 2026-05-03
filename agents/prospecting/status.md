@@ -1,7 +1,8 @@
 # Prospecting Agent Status
 
-Run state: running
+Run state: paused
 Execution target: local
+Preferred local pool: default
 Run interval seconds: 15
 Primary output file: workspace/prospects.md
 

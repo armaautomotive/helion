@@ -1,8 +1,9 @@
 # Email Support Agent Status
 
-Run state: paused
+Run state: running
 Execution target: cloud
-Run interval seconds: 300
+Preferred local pool: default
+Run interval seconds: 30
 Primary output file: workspace/reply_drafts.md
 
 Current objective:
@@ -10,6 +11,7 @@ Current objective:
 
 Current output locations:
 - `workspace/reply_drafts.md`
+- `workspace/inbox_summary.md`
 - `workspace/support_notes.md`
 
 Context maintenance:

@@ -4,6 +4,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
 import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 
 public record HelionConfig(
@@ -33,7 +35,9 @@ public record HelionConfig(
         Path usageEventsFile,
         EmailSettings emailSettings,
         String openAiApiKey,
-        String llamaCppBaseUrl) {
+        String llamaCppBaseUrl,
+        String defaultLocalPool,
+        List<LocalModelConfig> localModelPools) {
     private static final String DEFAULT_MANAGER_PROVIDER = "demo";
     private static final String DEFAULT_WORKER_PROVIDER = "llama.cpp";
     private static final String DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
@@ -84,6 +88,14 @@ public record HelionConfig(
                 boolConfig(properties, "HELION_EMAIL_SMTP_SSL", "helion.email.smtp.ssl", true));
         String apiKey = config(properties, "OPENAI_API_KEY", "helion.openai.api_key", "");
         String llamaCppBaseUrl = config(properties, "HELION_LLAMACPP_URL", "helion.llamacpp.url", "http://localhost:8080");
+        String defaultLocalPool = config(properties, "HELION_LOCAL_POOL_DEFAULT", "helion.local.pool.default", "default");
+        List<LocalModelConfig> localModelPools = loadLocalModelPools(
+                properties,
+                defaultLocalPool,
+                workerProvider,
+                workerModel,
+                workerCount,
+                llamaCppBaseUrl);
         return new HelionConfig(
                 managerProvider,
                 managerModel,
@@ -111,7 +123,9 @@ public record HelionConfig(
                 usageEventsFile,
                 emailSettings,
                 apiKey,
-                llamaCppBaseUrl);
+                llamaCppBaseUrl,
+                defaultLocalPool,
+                localModelPools);
     }
 
     private static Properties loadProperties() {
@@ -129,9 +143,11 @@ public record HelionConfig(
     }
 
     private static String config(Properties properties, String envKey, String propertyKey, String fallback) {
-        String envValue = System.getenv(envKey);
-        if (envValue != null && !envValue.isBlank()) {
-            return envValue.trim();
+        if (envKey != null && !envKey.isBlank()) {
+            String envValue = System.getenv(envKey);
+            if (envValue != null && !envValue.isBlank()) {
+                return envValue.trim();
+            }
         }
         String propertyValue = properties.getProperty(propertyKey);
         if (propertyValue != null && !propertyValue.isBlank()) {
@@ -151,5 +167,34 @@ public record HelionConfig(
     private static boolean boolConfig(Properties properties, String envKey, String propertyKey, boolean fallback) {
         String value = config(properties, envKey, propertyKey, Boolean.toString(fallback));
         return "true".equalsIgnoreCase(value) || "1".equals(value) || "yes".equalsIgnoreCase(value);
+    }
+
+    private static List<LocalModelConfig> loadLocalModelPools(
+            Properties properties,
+            String defaultLocalPool,
+            String fallbackProvider,
+            String fallbackModel,
+            int fallbackCapacity,
+            String fallbackUrl) {
+        String namesValue = config(properties, "HELION_LOCAL_POOL_NAMES", "helion.local.pool.names", "");
+        List<LocalModelConfig> pools = new ArrayList<>();
+        if (!namesValue.isBlank()) {
+            for (String rawName : namesValue.split(",")) {
+                String name = rawName == null ? "" : rawName.trim();
+                if (name.isBlank()) {
+                    continue;
+                }
+                String prefix = "helion.local.pool." + name + ".";
+                String provider = config(properties, "", prefix + "provider", fallbackProvider);
+                String model = config(properties, "", prefix + "model", fallbackModel);
+                String url = config(properties, "", prefix + "url", fallbackUrl);
+                int capacity = intConfig(properties, "", prefix + "capacity", Math.max(1, fallbackCapacity));
+                pools.add(new LocalModelConfig(name, provider, model, url, capacity));
+            }
+        }
+        if (pools.isEmpty()) {
+            pools.add(new LocalModelConfig(defaultLocalPool, fallbackProvider, fallbackModel, fallbackUrl, Math.max(1, fallbackCapacity)));
+        }
+        return List.copyOf(pools);
     }
 }

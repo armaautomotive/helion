@@ -9,6 +9,19 @@ helion.worker.model=your-loaded-model-name
 helion.worker.count=3
 helion.llamacpp.url=http://localhost:8080
 
+# Named local model pools. If omitted, Helion creates a single "default" pool
+# from the worker provider/model/count/url values above.
+helion.local.pool.default=default
+# helion.local.pool.names=default,deep
+# helion.local.pool.default.provider=llama.cpp
+# helion.local.pool.default.model=your-loaded-model-name
+# helion.local.pool.default.url=http://localhost:8080
+# helion.local.pool.default.capacity=2
+# helion.local.pool.deep.provider=llama.cpp
+# helion.local.pool.deep.model=your-large-model
+# helion.local.pool.deep.url=http://localhost:8081
+# helion.local.pool.deep.capacity=1
+
 helion.enable.browser=true
 helion.browser.result_limit=5
 helion.browser.fetch_char_limit=4000

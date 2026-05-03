@@ -8,6 +8,7 @@ import java.util.List;
 public final class AgentSupervisor {
     private static final Duration LOOP_SLEEP = Duration.ofSeconds(10);
     private static final int PROSPECTING_QUEUE_ITEMS_PER_CYCLE = 3;
+    private static final int SOCIAL_QUEUE_ITEMS_PER_CYCLE = 3;
 
     private final HelionConfig config;
     private final BusinessAgent agent;
@@ -16,6 +17,7 @@ public final class AgentSupervisor {
     private final AgentRuntimeStore runtimeStore;
     private final AgentActivityStore activityStore;
     private final ProspectSearchQueueStore prospectSearchQueueStore;
+    private final SocialSearchQueueStore socialSearchQueueStore;
     private final String onlyAgentId;
 
     public AgentSupervisor(HelionConfig config, BusinessAgent agent, AgentRegistry agentRegistry, String onlyAgentId) {
@@ -26,6 +28,7 @@ public final class AgentSupervisor {
         this.runtimeStore = new AgentRuntimeStore();
         this.activityStore = new AgentActivityStore();
         this.prospectSearchQueueStore = new ProspectSearchQueueStore(agentRegistry);
+        this.socialSearchQueueStore = new SocialSearchQueueStore(agentRegistry);
         this.onlyAgentId = onlyAgentId == null ? "" : onlyAgentId.trim();
     }
 
@@ -58,12 +61,16 @@ public final class AgentSupervisor {
             LocalDateTime startedAt = LocalDateTime.now();
             String task = taskNameFor(agentId);
             ProspectSearchQueueItem queueItem = queueItemFor(agentId);
+            SocialSearchQueueItem socialQueueItem = socialQueueItemFor(agentId);
             if ("prospecting".equals(agentId) && queueItem == null) {
+                continue;
+            }
+        if ("social-media".equals(agentId) && socialQueueItem == null) {
                 continue;
             }
             runtimeStore.write(profile, runtime.start(status.executionTarget(), task, startedAt));
             try {
-                CycleResult cycle = runAgentCycle(agentId, queueItem, status);
+                CycleResult cycle = runAgentCycle(agentId, queueItem, socialQueueItem, status);
                 if (cycle == null || cycle.message().isBlank()) {
                     continue;
                 }
@@ -76,7 +83,7 @@ public final class AgentSupervisor {
                         summarize(cycle.message()),
                         cycle.outputPath());
                 runtimeStore.write(profile, updated);
-                activityStore.append(profile, successEntry(agentId, task, queueItem, cycle, startedAt));
+                activityStore.append(profile, successEntry(agentId, task, queueItem, socialQueueItem, cycle, startedAt));
                 System.out.println(Ansi.green("[" + agentId + "] " + cycle.message()));
             } catch (Exception ex) {
                 LocalDateTime finishedAt = LocalDateTime.now();
@@ -87,10 +94,10 @@ public final class AgentSupervisor {
                         finishedAt,
                         ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
                 runtimeStore.write(profile, failed);
-                activityStore.append(profile, failureEntry(task, queueItem, startedAt, failed.lastErrorMessage()));
+                activityStore.append(profile, failureEntry(task, queueItem, socialQueueItem, startedAt, failed.lastErrorMessage()));
                 long cooldownSeconds = cooldownSeconds(status, failed);
                 LocalDateTime retryAt = finishedAt.plusSeconds(Math.max(5, cooldownSeconds));
-                activityStore.append(profile, blockedEntry(agentId, task, queueItem, finishedAt, failed.lastErrorMessage(), cooldownSeconds, retryAt));
+                activityStore.append(profile, blockedEntry(agentId, task, queueItem, socialQueueItem, finishedAt, failed.lastErrorMessage(), cooldownSeconds, retryAt));
             }
         }
     }
@@ -144,7 +151,7 @@ public final class AgentSupervisor {
         return first.isAfter(second) ? first : second;
     }
 
-    private CycleResult runAgentCycle(String agentId, ProspectSearchQueueItem queueItem, AgentStatus status) throws IOException, InterruptedException {
+    private CycleResult runAgentCycle(String agentId, ProspectSearchQueueItem queueItem, SocialSearchQueueItem socialQueueItem, AgentStatus status) throws IOException, InterruptedException {
         if ("prospecting".equals(agentId)) {
             AgentProfile profile = agentRegistry.load(agentId);
             if (profile == null) {
@@ -154,12 +161,32 @@ public final class AgentSupervisor {
                     agent.collectQueuedProspectsBatch(agentId, 5, PROSPECTING_QUEUE_ITEMS_PER_CYCLE, status.executionTarget()),
                     outputPathFor(agentId, status));
         }
+        if ("social-media".equals(agentId)) {
+            AgentProfile profile = agentRegistry.load(agentId);
+            if (profile == null) {
+                return new CycleResult("", "");
+            }
+            return new CycleResult(
+                    agent.collectQueuedSocialOpportunitiesBatch(agentId, 5, SOCIAL_QUEUE_ITEMS_PER_CYCLE, status.executionTarget()),
+                    outputPathFor(agentId, status));
+        }
+        if ("email-support".equals(agentId)) {
+            return new CycleResult(
+                    agent.syncEmailInbox(agentId, 8),
+                    "agents/" + agentId + "/workspace/inbox_summary.md");
+        }
         return new CycleResult("", "");
     }
 
     private String taskNameFor(String agentId) {
         if ("prospecting".equals(agentId)) {
             return "queued prospect batch";
+        }
+        if ("social-media".equals(agentId)) {
+            return "queued social batch";
+        }
+        if ("email-support".equals(agentId)) {
+            return "imap inbox sync";
         }
         return "autonomous cycle";
     }
@@ -178,7 +205,14 @@ public final class AgentSupervisor {
         return prospectSearchQueueStore.nextDue(agentId);
     }
 
-    private AgentActivityEntry successEntry(String agentId, String task, ProspectSearchQueueItem queueItem, CycleResult cycle, LocalDateTime timestamp) {
+    private SocialSearchQueueItem socialQueueItemFor(String agentId) throws IOException {
+        if (!"social-media".equals(agentId)) {
+            return null;
+        }
+        return socialSearchQueueStore.nextDue(agentId);
+    }
+
+    private AgentActivityEntry successEntry(String agentId, String task, ProspectSearchQueueItem queueItem, SocialSearchQueueItem socialQueueItem, CycleResult cycle, LocalDateTime timestamp) {
         String summary = summarize(cycle.message());
         StringBuilder details = new StringBuilder();
         details.append("Agent: ").append(agentId).append('\n');
@@ -190,26 +224,37 @@ public final class AgentSupervisor {
             details.append("Region: ").append(blank(queueItem.region())).append('\n');
             details.append("City: ").append(blank(queueItem.city())).append('\n');
             details.append("Industry: ").append(blank(queueItem.industry())).append('\n');
+        } else if (socialQueueItem != null) {
+            details.append("Queue item: ").append(socialQueueItem.id()).append('\n');
+            details.append("Query: ").append(socialQueueItem.effectiveQuery()).append('\n');
+            details.append("Pass: ").append(socialQueueItem.pass()).append('\n');
+            details.append("Site: ").append(blank(socialQueueItem.site())).append('\n');
+            details.append("Topic: ").append(blank(socialQueueItem.topic())).append('\n');
+            details.append("Audience: ").append(blank(socialQueueItem.audience())).append('\n');
         }
         details.append('\n');
         details.append(cycle.message());
         return new AgentActivityEntry(timestamp, "success", task, summary, details.toString().trim());
     }
 
-    private AgentActivityEntry failureEntry(String task, ProspectSearchQueueItem queueItem, LocalDateTime timestamp, String errorMessage) {
+    private AgentActivityEntry failureEntry(String task, ProspectSearchQueueItem queueItem, SocialSearchQueueItem socialQueueItem, LocalDateTime timestamp, String errorMessage) {
         StringBuilder details = new StringBuilder();
         details.append("Task: ").append(task).append('\n');
         if (queueItem != null) {
             details.append("Queue item: ").append(queueItem.id()).append('\n');
             details.append("Query: ").append(queueItem.effectiveQuery()).append('\n');
             details.append("Pass: ").append(queueItem.pass()).append('\n');
+        } else if (socialQueueItem != null) {
+            details.append("Queue item: ").append(socialQueueItem.id()).append('\n');
+            details.append("Query: ").append(socialQueueItem.effectiveQuery()).append('\n');
+            details.append("Pass: ").append(socialQueueItem.pass()).append('\n');
         }
         details.append('\n');
         details.append("Error: ").append(blank(errorMessage));
         return new AgentActivityEntry(timestamp, "error", task, blank(errorMessage), details.toString().trim());
     }
 
-    private AgentActivityEntry blockedEntry(String agentId, String task, ProspectSearchQueueItem queueItem, LocalDateTime timestamp, String errorMessage, long cooldownSeconds, LocalDateTime retryAt) {
+    private AgentActivityEntry blockedEntry(String agentId, String task, ProspectSearchQueueItem queueItem, SocialSearchQueueItem socialQueueItem, LocalDateTime timestamp, String errorMessage, long cooldownSeconds, LocalDateTime retryAt) {
         StringBuilder details = new StringBuilder();
         details.append("Agent: ").append(agentId).append('\n');
         details.append("Task: ").append(task).append('\n');
@@ -217,6 +262,10 @@ public final class AgentSupervisor {
             details.append("Queue item: ").append(queueItem.id()).append('\n');
             details.append("Query: ").append(queueItem.effectiveQuery()).append('\n');
             details.append("Pass: ").append(queueItem.pass()).append('\n');
+        } else if (socialQueueItem != null) {
+            details.append("Queue item: ").append(socialQueueItem.id()).append('\n');
+            details.append("Query: ").append(socialQueueItem.effectiveQuery()).append('\n');
+            details.append("Pass: ").append(socialQueueItem.pass()).append('\n');
         }
         details.append("Blocked reason: ").append(blank(errorMessage)).append('\n');
         details.append("Cooldown seconds: ").append(cooldownSeconds).append('\n');

@@ -2,7 +2,8 @@
 
 Run state: paused
 Execution target: cloud
-Run interval seconds: 600
+Preferred local pool: default
+Run interval seconds: 60
 Primary output file: workspace/opportunities.md
 
 Current objective:
