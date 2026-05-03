@@ -3,7 +3,7 @@
 Run state: running
 Execution target: cloud
 Preferred local pool: default
-Run interval seconds: 30
+Run interval seconds: 120
 Primary output file: workspace/reply_drafts.md
 
 Current objective:
@@ -17,3 +17,4 @@ Current output locations:
 Context maintenance:
 - Distill reusable product and response knowledge into `distilled/`
 - Keep drafts and unresolved questions in the workspace until they are incorporated into cleaner support context
+Last run: 2026-05-02T23:42:00.351315

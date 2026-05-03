@@ -84,7 +84,6 @@ public final class AgentSupervisor {
                         cycle.outputPath());
                 runtimeStore.write(profile, updated);
                 activityStore.append(profile, successEntry(agentId, task, queueItem, socialQueueItem, cycle, startedAt));
-                System.out.println(Ansi.green("[" + agentId + "] " + cycle.message()));
             } catch (Exception ex) {
                 LocalDateTime finishedAt = LocalDateTime.now();
                 AgentRuntime failed = runtime.failure(
@@ -172,8 +171,8 @@ public final class AgentSupervisor {
         }
         if ("email-support".equals(agentId)) {
             return new CycleResult(
-                    agent.syncEmailInbox(agentId, 8),
-                    "agents/" + agentId + "/workspace/inbox_summary.md");
+                    agent.syncAndDraftEmailInbox(agentId, 8, 3),
+                    outputPathFor(agentId, status));
         }
         return new CycleResult("", "");
     }

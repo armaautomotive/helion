@@ -10,6 +10,7 @@ public record EmailSettings(
         String imapUsername,
         String imapPassword,
         boolean imapSsl,
+        String imapDraftsFolder,
         String smtpHost,
         int smtpPort,
         String smtpUsername,
@@ -25,6 +26,7 @@ public record EmailSettings(
                 Address: %s
                 Display name: %s
                 IMAP: %s:%d (%s)
+                IMAP Drafts folder: %s
                 SMTP: %s:%d (%s)
                 """.formatted(
                 valueOrDefault(provider, "unspecified"),
@@ -33,6 +35,7 @@ public record EmailSettings(
                 valueOrDefault(imapHost, "unspecified"),
                 imapPort,
                 imapSsl ? "ssl" : "plain",
+                valueOrDefault(imapDraftsFolder, "Drafts"),
                 valueOrDefault(smtpHost, "unspecified"),
                 smtpPort,
                 smtpSsl ? "ssl" : "plain").trim();

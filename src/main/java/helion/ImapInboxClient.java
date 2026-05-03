@@ -47,6 +47,27 @@ public final class ImapInboxClient {
         }
     }
 
+    public static void appendDraft(EmailSettings settings, String mimeMessage) throws IOException {
+        if (!settings.enabled()) {
+            throw new IOException("Email is disabled.");
+        }
+        if (blank(settings.imapHost()) || blank(settings.imapUsername()) || blank(settings.imapPassword())) {
+            throw new IOException("IMAP settings are incomplete.");
+        }
+        String folder = blank(settings.imapDraftsFolder()) ? "Drafts" : settings.imapDraftsFolder().trim();
+        String payload = mimeMessage == null ? "" : mimeMessage.replace("\r\n", "\n").replace("\n", "\r\n");
+
+        try (Socket socket = openSocket(settings);
+             BufferedInputStream input = new BufferedInputStream(socket.getInputStream());
+             BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream())) {
+            ImapSession session = new ImapSession(input, output);
+            session.readGreeting();
+            session.command("LOGIN " + quoted(settings.imapUsername()) + " " + quoted(settings.imapPassword()));
+            session.append(folder, payload);
+            session.command("LOGOUT");
+        }
+    }
+
     private static Socket openSocket(EmailSettings settings) throws IOException {
         if (settings.imapSsl()) {
             return SSLSocketFactory.getDefault().createSocket(settings.imapHost(), settings.imapPort());
@@ -151,6 +172,31 @@ public final class ImapInboxClient {
                         throw new IOException("IMAP command failed: " + line);
                     }
                     return response.toString().trim();
+                }
+            }
+        }
+
+        void append(String folder, String payload) throws IOException {
+            String tag = String.format("A%04d", counter++);
+            writeLine(tag + " APPEND " + quoted(folder) + " {" + payload.getBytes(StandardCharsets.UTF_8).length + "}");
+            String continuation = readLine();
+            if (continuation == null || !continuation.startsWith("+")) {
+                throw new IOException("IMAP APPEND was not accepted.");
+            }
+            output.write(payload.getBytes(StandardCharsets.UTF_8));
+            output.write("\r\n".getBytes(StandardCharsets.UTF_8));
+            output.flush();
+
+            while (true) {
+                String line = readLine();
+                if (line == null) {
+                    throw new IOException("IMAP connection closed during APPEND.");
+                }
+                if (line.startsWith(tag + " ")) {
+                    if (!line.toUpperCase(Locale.ROOT).contains(" OK")) {
+                        throw new IOException("IMAP APPEND failed: " + line);
+                    }
+                    return;
                 }
             }
         }

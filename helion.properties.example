@@ -55,6 +55,7 @@ helion.email.imap.port=993
 helion.email.imap.username=you@example.com
 helion.email.imap.password=replace_me
 helion.email.imap.ssl=true
+helion.email.imap.drafts_folder=Drafts
 helion.email.smtp.host=smtp.example.com
 helion.email.smtp.port=465
 helion.email.smtp.username=you@example.com

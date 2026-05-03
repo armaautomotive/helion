@@ -81,6 +81,7 @@ public record HelionConfig(
                 config(properties, "HELION_EMAIL_IMAP_USERNAME", "helion.email.imap.username", ""),
                 config(properties, "HELION_EMAIL_IMAP_PASSWORD", "helion.email.imap.password", ""),
                 boolConfig(properties, "HELION_EMAIL_IMAP_SSL", "helion.email.imap.ssl", true),
+                config(properties, "HELION_EMAIL_IMAP_DRAFTS_FOLDER", "helion.email.imap.drafts_folder", "Drafts"),
                 config(properties, "HELION_EMAIL_SMTP_HOST", "helion.email.smtp.host", ""),
                 intConfig(properties, "HELION_EMAIL_SMTP_PORT", "helion.email.smtp.port", 465),
                 config(properties, "HELION_EMAIL_SMTP_USERNAME", "helion.email.smtp.username", ""),

@@ -496,6 +496,12 @@ public final class BusinessAgent {
         return emailDraftStore.saveDraft(agentId, to, subject, body, notes);
     }
 
+    public String syncAndDraftEmailInbox(String agentId, int syncLimit, int draftLimit) throws IOException, InterruptedException {
+        String syncResult = syncEmailInbox(agentId, syncLimit);
+        String draftResult = generateEmailDraftsFromInbox(agentId, draftLimit);
+        return syncResult + "\n" + draftResult;
+    }
+
     public String syncEmailInbox(String agentId, int limit) throws IOException {
         AgentProfile profile = agentRegistry.load(agentId);
         if (profile == null) {
@@ -529,6 +535,106 @@ public final class BusinessAgent {
                     "Agent: " + agentId + "\nLimit: " + Math.max(1, limit) + "\nIMAP host: " + nonBlank(config.emailSettings().imapHost()) + "\nError: " + nonBlank(ex.getMessage()));
             throw ex;
         }
+    }
+
+    public String generateEmailDraftsFromInbox(String agentId, int limit) throws IOException, InterruptedException {
+        return withUsageAgent(agentId, () -> generateEmailDraftsFromInboxInternal(agentId, limit));
+    }
+
+    private String generateEmailDraftsFromInboxInternal(String agentId, int limit) throws IOException, InterruptedException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return "Unknown agent: " + agentId;
+        }
+        Path inboxFile = profile.workspaceDir().resolve("inbox_summary.md");
+        String inboxSummary = readIfExists(inboxFile);
+        List<EmailInboxSummaryMessage> messages = EmailInboxSummaryParser.parse(inboxSummary);
+        if (messages.isEmpty()) {
+            return "No inbox messages available for drafting.";
+        }
+
+        String existingDrafts = readIfExists(AgentOutputResolver.resolvePrimaryOutputFile(profile, config, "workspace/reply_drafts.md"));
+        List<EmailInboxSummaryMessage> actionable = new ArrayList<>();
+        for (EmailInboxSummaryMessage message : messages) {
+            if (!isExternalInboxMessage(message)) {
+                continue;
+            }
+            if (alreadyDrafted(existingDrafts, message.sequenceNumber())) {
+                continue;
+            }
+            actionable.add(message);
+            if (actionable.size() >= Math.max(1, limit)) {
+                break;
+            }
+        }
+        if (actionable.isEmpty()) {
+            return "No new inbox messages need draft replies.";
+        }
+
+        AgentActivityStore activityStore = new AgentActivityStore();
+        LlmProvider coordinator = coordinatorProvider(agentId);
+        String role = readIfExists(profile.roleFile());
+        String distilled = new DirectoryCorpus(true, profile.distilledDir(), 5000, 4).loadContext();
+        String businessContext = TextUtils.limit(knowledgeBase.loadContext(), 5000);
+        int drafted = 0;
+
+        for (EmailInboxSummaryMessage message : actionable) {
+            String to = firstEmailAddress(message.from());
+            String subject = replySubject(message.subject());
+            String prompt = """
+                    Role:
+                    %s
+
+                    Distilled email-support context:
+                    %s
+
+                    Business context:
+                    %s
+
+                    Customer message:
+                    - From: %s
+                    - Subject: %s
+                    - Date: %s
+                    - Preview: %s
+
+                    Write a concise draft reply email body for Arma Automotive.
+                    Rules:
+                    - Be practical and polite.
+                    - If the inquiry is not a fit for the business, say so clearly and briefly.
+                    - Do not invent technical specs or commitments.
+                    - Return only the email body, no headings or commentary.
+                    """.formatted(
+                    role,
+                    distilled,
+                    businessContext,
+                    message.from(),
+                    message.subject(),
+                    message.date(),
+                    message.preview());
+            try {
+                String body = coordinator.complete(buildSystemPrompt(AgentMode.EMAIL), prompt).trim();
+                String notes = "Auto-drafted from inbox message " + message.sequenceNumber();
+                emailDraftStore.saveDraft(agentId, to, subject, body, notes);
+                drafted++;
+                logAgentActivity(
+                        activityStore,
+                        profile,
+                        "success",
+                        "email-draft",
+                        "Drafted reply for inbox message " + message.sequenceNumber(),
+                        "To: " + nonBlank(to) + "\nSubject: " + nonBlank(subject) + "\nFrom: " + nonBlank(message.from()) + "\nPreview: " + TextUtils.limit(message.preview(), 500));
+            } catch (IOException ex) {
+                logAgentActivity(
+                        activityStore,
+                        profile,
+                        "error",
+                        "email-draft",
+                        "Draft generation failed for inbox message " + message.sequenceNumber(),
+                        "From: " + nonBlank(message.from()) + "\nSubject: " + nonBlank(message.subject()) + "\nError: " + nonBlank(ex.getMessage()));
+                throw ex;
+            }
+        }
+        return "Drafted " + drafted + " email repl" + (drafted == 1 ? "y." : "ies.");
     }
 
     public String collectProspects(String agentId, String searchFocus, int count) throws IOException, InterruptedException {
@@ -768,6 +874,41 @@ public final class BusinessAgent {
 
     private String nonBlank(String value) {
         return value == null || value.isBlank() ? "(none)" : value;
+    }
+
+    private boolean isExternalInboxMessage(EmailInboxSummaryMessage message) {
+        if (message == null) {
+            return false;
+        }
+        String sender = firstEmailAddress(message.from()).toLowerCase();
+        String supportAddress = config.emailSettings().address() == null ? "" : config.emailSettings().address().trim().toLowerCase();
+        if (!supportAddress.isBlank() && sender.equals(supportAddress)) {
+            return false;
+        }
+        return !sender.isBlank();
+    }
+
+    private boolean alreadyDrafted(String draftsContent, int sequenceNumber) {
+        if (draftsContent == null || draftsContent.isBlank() || sequenceNumber < 0) {
+            return false;
+        }
+        return draftsContent.contains("Auto-drafted from inbox message " + sequenceNumber);
+    }
+
+    private String firstEmailAddress(String value) {
+        List<String> emails = extractEmails(value, 1);
+        return emails.isEmpty() ? "" : emails.get(0);
+    }
+
+    private String replySubject(String subject) {
+        String value = subject == null ? "" : subject.trim();
+        if (value.isBlank()) {
+            return "Re: Your message";
+        }
+        if (value.regionMatches(true, 0, "Re:", 0, 3)) {
+            return value;
+        }
+        return "Re: " + value;
     }
 
     private List<ProspectRecord> filterGroundedProspects(List<ProspectRecord> records) {
