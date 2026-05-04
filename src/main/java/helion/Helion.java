@@ -122,6 +122,14 @@ public final class Helion {
                 addProspectQueueItem(agentRegistry, agent, currentAgent, input.substring("/queue add ".length()).trim());
                 continue;
             }
+            if ("/queue seed".equalsIgnoreCase(input) || "/queue cities".equalsIgnoreCase(input)) {
+                seedProspectQueueFromCities(agentRegistry, agent, currentAgent);
+                continue;
+            }
+            if ("/queue rebuild".equalsIgnoreCase(input)) {
+                rebuildProspectQueueFromCities(agentRegistry, agent, currentAgent);
+                continue;
+            }
             if (input.toLowerCase().startsWith("/distill ")) {
                 runDistill(agent, input.substring("/distill ".length()).trim());
                 continue;
@@ -231,6 +239,8 @@ public final class Helion {
         System.out.println("/prospect <search focus>  Run an ad-hoc prospect search and save the results");
         System.out.println("/queue  List queued prospect searches for the current agent");
         System.out.println("/queue add <query template> | <region> | <city> | <industry> | <notes>  Add a queued prospect search");
+        System.out.println("/queue seed  Generate queued prospect searches from workspace/cities.csv");
+        System.out.println("/queue rebuild  Archive and rebuild the prospect queue from cities.csv and market categories");
         System.out.println("/usage  Show per-model usage stats");
         System.out.println("/emailconfig  Show configured email transport settings");
         System.out.println("/emailsync  Run a read-only IMAP inbox sync for the current agent");
@@ -403,6 +413,38 @@ public final class Helion {
             System.out.println(Ansi.green(agent.addProspectQueueItem(currentAgent, queryTemplate, region, city, industry, notes)));
         } catch (Exception ex) {
             System.out.println(Ansi.red("Queue add failed: " + ex.getMessage()));
+        }
+    }
+
+    private static void seedProspectQueueFromCities(AgentRegistry agentRegistry, BusinessAgent agent, String currentAgent) {
+        if (currentAgent == null || currentAgent.isBlank()) {
+            System.out.println(Ansi.yellow("Select an agent first with /agent <id>."));
+            return;
+        }
+        if (agentRegistry.load(currentAgent) == null) {
+            System.out.println(Ansi.yellow("Unknown agent: " + currentAgent));
+            return;
+        }
+        try {
+            System.out.println(Ansi.green(agent.seedProspectQueueFromCities(currentAgent)));
+        } catch (Exception ex) {
+            System.out.println(Ansi.red("Queue seed failed: " + ex.getMessage()));
+        }
+    }
+
+    private static void rebuildProspectQueueFromCities(AgentRegistry agentRegistry, BusinessAgent agent, String currentAgent) {
+        if (currentAgent == null || currentAgent.isBlank()) {
+            System.out.println(Ansi.yellow("Select an agent first with /agent <id>."));
+            return;
+        }
+        if (agentRegistry.load(currentAgent) == null) {
+            System.out.println(Ansi.yellow("Unknown agent: " + currentAgent));
+            return;
+        }
+        try {
+            System.out.println(Ansi.green(agent.rebuildProspectQueueFromCities(currentAgent)));
+        } catch (Exception ex) {
+            System.out.println(Ansi.red("Queue rebuild failed: " + ex.getMessage()));
         }
     }
 

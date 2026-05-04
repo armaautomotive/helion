@@ -53,6 +53,7 @@ public final class AgentSupervisor {
             if (!status.isRunnable()) {
                 continue;
             }
+            refreshDistilledContext(profile, agentId);
             AgentRuntime runtime = runtimeStore.read(profile, status.executionTarget());
             runtime = recoverStaleRun(profile, agentId, status, runtime, LocalDateTime.now());
             if (!isDue(status, runtime, LocalDateTime.now())) {
@@ -138,6 +139,28 @@ public final class AgentSupervisor {
             cooldownSeconds *= Math.min(6, 1L << Math.min(3, runtime.consecutiveFailures()));
         }
         return cooldownSeconds;
+    }
+
+    private void refreshDistilledContext(AgentProfile profile, String agentId) throws IOException, InterruptedException {
+        try {
+            String result = agent.refreshDistilledContextIfNeeded(agentId);
+            if (result == null || result.isBlank()) {
+                return;
+            }
+            activityStore.append(profile, new AgentActivityEntry(
+                    LocalDateTime.now(),
+                    "success",
+                    "distill-refresh",
+                    "Refreshed distilled context",
+                    "Agent: " + agentId + "\n" + result));
+        } catch (Exception ex) {
+            activityStore.append(profile, new AgentActivityEntry(
+                    LocalDateTime.now(),
+                    "error",
+                    "distill-refresh",
+                    "Distill refresh failed",
+                    "Agent: " + agentId + "\nError: " + blank(ex.getMessage())));
+        }
     }
 
     private LocalDateTime latest(LocalDateTime first, LocalDateTime second) {

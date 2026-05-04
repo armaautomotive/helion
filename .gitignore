@@ -3,3 +3,7 @@
 out/
 target/
 helion.properties
+agents/*/distilled/.distill_state.json
+agents/*/activity.jsonl
+agents/*/runtime.json
+agents/*/workspace/search_queue.archive.*.csv

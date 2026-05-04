@@ -32,13 +32,18 @@ public final class AgentDistiller {
     }
 
     public List<DistilledFile> distill(AgentProfile profile) throws IOException, InterruptedException {
+        return distill(profile, provider);
+    }
+
+    public List<DistilledFile> distill(AgentProfile profile, LlmProvider selectedProvider) throws IOException, InterruptedException {
         String role = readIfExists(profile.roleFile());
         String distillInstructions = readIfExists(profile.distillFile());
         String knowledge = knowledgeBase.loadContext();
         String companyData = companyDataCorpus.loadContext();
         List<String> expectedFiles = expectedFilesFor(profile.id());
+        LlmProvider activeProvider = selectedProvider == null ? provider : selectedProvider;
 
-        if ("demo".equals(provider.name())) {
+        if ("demo".equals(activeProvider.name())) {
             return buildDemoFiles(profile, role, distillInstructions, knowledge, companyData, expectedFiles);
         }
 
@@ -88,7 +93,7 @@ public final class AgentDistiller {
                 defaultIfBlank(companyData, "No company data loaded."),
                 String.join(", ", expectedFiles));
 
-        String raw = provider.complete(systemPrompt, userPrompt);
+        String raw = activeProvider.complete(systemPrompt, userPrompt);
         List<DistilledFile> files = canonicalizeFiles(parseFiles(raw), expectedFiles);
         if (files.isEmpty()) {
             files = buildFallbackFiles(raw, expectedFiles);

@@ -6,6 +6,7 @@ public record AgentStatus(
         String runState,
         String executionTarget,
         String preferredLocalPool,
+        String prospectingSearchStrategy,
         int runIntervalSeconds,
         LocalDateTime lastRun,
         String primaryOutputFile,
@@ -18,10 +19,11 @@ public record AgentStatus(
         String runState = normalizeRunState(firstMatchingValue(text, "Run state:"));
         String executionTarget = normalizeExecutionTarget(firstMatchingValue(text, "Execution target:"), config);
         String preferredLocalPool = normalizePreferredLocalPool(firstMatchingValue(text, "Preferred local pool:"), config);
+        String prospectingSearchStrategy = normalizeProspectingSearchStrategy(firstMatchingValue(text, "Prospecting search strategy:"));
         int runIntervalSeconds = parsePositiveInt(firstMatchingValue(text, "Run interval seconds:"), DEFAULT_RUN_INTERVAL_SECONDS);
         LocalDateTime lastRun = parseDateTime(firstMatchingValue(text, "Last run:"));
         String primaryOutputFile = normalizeOutputFile(firstMatchingValue(text, "Primary output file:"));
-        return new AgentStatus(runState, executionTarget, preferredLocalPool, runIntervalSeconds, lastRun, primaryOutputFile, text);
+        return new AgentStatus(runState, executionTarget, preferredLocalPool, prospectingSearchStrategy, runIntervalSeconds, lastRun, primaryOutputFile, text);
     }
 
     public static String inferExecutionTargetFromConfig(HelionConfig config) {
@@ -45,6 +47,7 @@ public record AgentStatus(
         ensureLine(out, "Run state:", runState);
         ensureLine(out, "Execution target:", executionTarget);
         ensureLine(out, "Preferred local pool:", preferredLocalPool);
+        ensureLine(out, "Prospecting search strategy:", prospectingSearchStrategy);
         ensureLine(out, "Run interval seconds:", Integer.toString(runIntervalSeconds));
         if (!primaryOutputFile.isBlank()) {
             ensureLine(out, "Primary output file:", primaryOutputFile);
@@ -60,6 +63,7 @@ public record AgentStatus(
         String updated = replaceOrAppendLine(base, "Run state:", runState);
         updated = replaceOrAppendLine(updated, "Execution target:", executionTarget);
         updated = replaceOrAppendLine(updated, "Preferred local pool:", preferredLocalPool);
+        updated = replaceOrAppendLine(updated, "Prospecting search strategy:", prospectingSearchStrategy);
         updated = replaceOrAppendLine(updated, "Run interval seconds:", Integer.toString(runIntervalSeconds));
         updated = replaceOrAppendLine(updated, "Primary output file:", primaryOutputFile);
         updated = replaceOrAppendLine(updated, "Last run:", when.toString());
@@ -81,6 +85,7 @@ public record AgentStatus(
         String updated = replaceOrAppendLine(base, "Run state:", normalizedState);
         updated = replaceOrAppendLine(updated, "Execution target:", normalizedTarget);
         updated = replaceOrAppendLine(updated, "Preferred local pool:", normalizedPool);
+        updated = replaceOrAppendLine(updated, "Prospecting search strategy:", prospectingSearchStrategy);
         updated = replaceOrAppendLine(updated, "Run interval seconds:", Integer.toString(interval));
         updated = replaceOrAppendLine(updated, "Primary output file:", outputFile);
         return updated.trim();
@@ -91,6 +96,7 @@ public record AgentStatus(
         out.append("Run state: ").append(runState).append('\n');
         out.append("Execution target: ").append(executionTarget).append('\n');
         out.append("Preferred local pool: ").append(preferredLocalPool).append('\n');
+        out.append("Prospecting search strategy: ").append(prospectingSearchStrategy).append('\n');
         out.append("Run interval seconds: ").append(runIntervalSeconds).append('\n');
         if (!primaryOutputFile.isBlank()) {
             out.append("Primary output file: ").append(primaryOutputFile).append('\n');
@@ -191,6 +197,14 @@ public record AgentStatus(
             return config.defaultLocalPool().trim().toLowerCase();
         }
         return "default";
+    }
+
+    private static String normalizeProspectingSearchStrategy(String value) {
+        String normalized = value == null ? "" : value.trim().toLowerCase();
+        return switch (normalized) {
+            case "guided", "llm" -> normalized;
+            default -> "auto";
+        };
     }
 
     private static String normalizeOutputFile(String value) {

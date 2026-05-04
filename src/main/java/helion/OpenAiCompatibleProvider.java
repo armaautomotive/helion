@@ -15,8 +15,9 @@ public class OpenAiCompatibleProvider implements LlmProvider {
     private final String endpoint;
     private final String model;
     private final String authorizationHeader;
+    private final Duration requestTimeout;
 
-    public OpenAiCompatibleProvider(String providerName, String endpoint, String model, String authorizationHeader) {
+    public OpenAiCompatibleProvider(String providerName, String endpoint, String model, String authorizationHeader, int requestTimeoutSeconds) {
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(20))
                 .build();
@@ -24,6 +25,7 @@ public class OpenAiCompatibleProvider implements LlmProvider {
         this.endpoint = endpoint;
         this.model = model;
         this.authorizationHeader = authorizationHeader;
+        this.requestTimeout = Duration.ofSeconds(Math.max(30, requestTimeoutSeconds));
     }
 
     @Override
@@ -41,7 +43,7 @@ public class OpenAiCompatibleProvider implements LlmProvider {
         String body = buildBody(messages);
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(endpoint))
-                .timeout(Duration.ofSeconds(120))
+                .timeout(requestTimeout)
                 .header("Content-Type", "application/json");
         if (authorizationHeader != null && !authorizationHeader.isBlank()) {
             builder.header("Authorization", authorizationHeader);

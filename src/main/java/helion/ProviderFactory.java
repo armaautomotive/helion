@@ -91,9 +91,9 @@ public final class ProviderFactory {
         String provider = providerName == null ? "" : providerName.trim().toLowerCase();
         LlmProvider base;
         if ("openai".equals(provider) && !config.openAiApiKey().isBlank()) {
-            base = new OpenAiProvider(config.openAiApiKey(), model);
+            base = new OpenAiProvider(config.openAiApiKey(), model, config.llmRequestTimeoutSeconds());
         } else if ("llama.cpp".equals(provider) || "llamacpp".equals(provider) || "llama".equals(provider)) {
-            base = new LlamaCppProvider(baseUrl, model);
+            base = new LlamaCppProvider(baseUrl, model, config.llmRequestTimeoutSeconds());
         } else {
             base = new DemoBusinessProvider();
         }

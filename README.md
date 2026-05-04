@@ -298,6 +298,9 @@ Distillation workflow:
 - `role.md` defines the agent’s responsibilities
 - `distill.md` defines what relevant facts should be extracted from shared company data
 - `/distill` refreshes the selected agent’s `distilled/` files using its role, distillation instructions, shared knowledge, and configured company-data sources
+- runnable agents also perform a background distill check every `helion.distill.check_seconds` seconds
+- if shared company files, shared knowledge files, or the agent’s role/distill files are newer than the last distill state, Helion refreshes that agent’s `distilled/` files automatically before normal work continues
+- background distill refresh uses the agent’s selected execution target and preferred local pool when applicable
 
 ## Manager Protocol
 

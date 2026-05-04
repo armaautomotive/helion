@@ -3,6 +3,7 @@
 Run state: paused
 Execution target: local
 Preferred local pool: default
+Prospecting search strategy: auto
 Run interval seconds: 300
 Primary output file: workspace/output.md
 

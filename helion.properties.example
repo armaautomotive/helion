@@ -25,6 +25,8 @@ helion.local.pool.default=default
 helion.enable.browser=true
 helion.browser.result_limit=5
 helion.browser.fetch_char_limit=4000
+helion.llm.request_timeout_seconds=600
+helion.distill.check_seconds=14400
 
 helion.enable.memory=true
 helion.memory.dir=.helion/memory

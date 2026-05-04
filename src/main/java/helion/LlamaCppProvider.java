@@ -1,8 +1,8 @@
 package helion;
 
 public final class LlamaCppProvider extends OpenAiCompatibleProvider {
-    public LlamaCppProvider(String baseUrl, String model) {
-        super("llama.cpp", normalize(baseUrl) + "/v1/chat/completions", model, null);
+    public LlamaCppProvider(String baseUrl, String model, int requestTimeoutSeconds) {
+        super("llama.cpp", normalize(baseUrl) + "/v1/chat/completions", model, null, requestTimeoutSeconds);
     }
 
     private static String normalize(String baseUrl) {

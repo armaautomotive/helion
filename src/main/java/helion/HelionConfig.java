@@ -18,6 +18,8 @@ public record HelionConfig(
         boolean browserEnabled,
         int browserResultLimit,
         int browserFetchCharLimit,
+        int llmRequestTimeoutSeconds,
+        int distillCheckSeconds,
         boolean memoryEnabled,
         Path memoryDir,
         String memoryNamespace,
@@ -56,6 +58,8 @@ public record HelionConfig(
         boolean browserEnabled = boolConfig(properties, "HELION_ENABLE_BROWSER", "helion.enable.browser", false);
         int browserResultLimit = intConfig(properties, "HELION_BROWSER_RESULT_LIMIT", "helion.browser.result_limit", 5);
         int browserFetchCharLimit = intConfig(properties, "HELION_BROWSER_FETCH_CHAR_LIMIT", "helion.browser.fetch_char_limit", 4000);
+        int llmRequestTimeoutSeconds = intConfig(properties, "HELION_LLM_REQUEST_TIMEOUT_SECONDS", "helion.llm.request_timeout_seconds", 600);
+        int distillCheckSeconds = intConfig(properties, "HELION_DISTILL_CHECK_SECONDS", "helion.distill.check_seconds", 14400);
         boolean memoryEnabled = boolConfig(properties, "HELION_ENABLE_MEMORY", "helion.enable.memory", true);
         Path memoryDir = Path.of(config(properties, "HELION_MEMORY_DIR", "helion.memory.dir", ".helion/memory"));
         String memoryNamespace = config(properties, "HELION_MEMORY_NAMESPACE", "helion.memory.namespace", "default");
@@ -107,6 +111,8 @@ public record HelionConfig(
                 browserEnabled,
                 browserResultLimit,
                 browserFetchCharLimit,
+                llmRequestTimeoutSeconds,
+                distillCheckSeconds,
                 memoryEnabled,
                 memoryDir,
                 memoryNamespace,

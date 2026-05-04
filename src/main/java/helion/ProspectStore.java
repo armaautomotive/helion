@@ -35,9 +35,11 @@ public final class ProspectStore {
         Files.createDirectories(profile.workspaceDir());
         Path markdownFile = AgentOutputResolver.resolvePrimaryOutputFile(profile, config, "workspace/prospects.md");
         Path csvFile = profile.workspaceDir().resolve("prospects.csv");
+        Path pendingDir = profile.workspaceDir().resolve("Pending");
         if (markdownFile.getParent() != null) {
             Files.createDirectories(markdownFile.getParent());
         }
+        Files.createDirectories(pendingDir);
 
         if (!Files.exists(markdownFile)) {
             Files.writeString(markdownFile, "# Prospect List\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE);
@@ -69,8 +71,117 @@ public final class ProspectStore {
         }
         Files.writeString(csvFile, csv.toString(), StandardCharsets.UTF_8, StandardOpenOption.APPEND);
 
+        int pendingCreated = createPendingLetters(pendingDir, uniqueRecords);
+
         return "Saved " + uniqueRecords.size() + " prospects to " + markdownFile + " and " + csvFile
+                + ". Created " + pendingCreated + " pending letters in " + pendingDir
                 + ". Skipped " + skipped + " duplicates.";
+    }
+
+    private int createPendingLetters(Path pendingDir, List<ProspectRecord> records) throws IOException {
+        int created = 0;
+        for (ProspectRecord record : records) {
+            Path file = pendingDir.resolve(pendingFileName(record));
+            if (Files.exists(file)) {
+                continue;
+            }
+            Files.writeString(
+                    file,
+                    renderPendingLetter(record),
+                    StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE_NEW,
+                    StandardOpenOption.WRITE);
+            created++;
+        }
+        return created;
+    }
+
+    private String pendingFileName(ProspectRecord record) {
+        String slug = slugify(record.company());
+        if (slug.isBlank()) {
+            slug = "prospect";
+        }
+        return slug + ".md";
+    }
+
+    private String renderPendingLetter(ProspectRecord record) {
+        String company = valueOrDefault(record.company(), "Prospect");
+        String contactName = valueOrDefault(record.contactName(), "");
+        String contactRole = valueOrDefault(record.contactRole(), "Owner / Production Manager");
+        String contactEmail = valueOrDefault(record.contactEmail(), "");
+        String website = valueOrDefault(record.website(), "");
+        String location = valueOrDefault(record.location(), "");
+        String whyFit = valueOrDefault(record.whyFit(), "");
+        String evidence = valueOrDefault(record.evidence(), "");
+        String greeting = contactName.isBlank() ? "Hi" : "Hi " + contactName;
+        String subject = "Arma Automotive tube notching workflow for " + company;
+
+        StringBuilder out = new StringBuilder();
+        out.append("# Pending Outreach Draft: ").append(company).append('\n').append('\n');
+        out.append("- Status: pending review\n");
+        out.append("- Subject: ").append(subject).append('\n');
+        out.append("- To: ").append(contactEmail).append('\n');
+        out.append("- Contact: ").append(contactName).append('\n');
+        out.append("- Role: ").append(contactRole).append('\n');
+        out.append("- Company: ").append(company).append('\n');
+        out.append("- Website: ").append(website).append('\n');
+        out.append("- Location: ").append(location).append('\n');
+        out.append("- Fit score: ").append(valueOrDefault(record.fitScore(), "")).append('\n');
+        out.append("- Why fit: ").append(whyFit).append('\n');
+        out.append("- Evidence: ").append(evidence).append('\n');
+        if (record.sourceUrls() != null && !record.sourceUrls().isEmpty()) {
+            out.append("- Sources: ").append(String.join(", ", record.sourceUrls())).append('\n');
+        }
+        out.append('\n');
+        out.append("## Draft\n\n");
+        out.append(greeting).append(",\n\n");
+        out.append("I came across ").append(company);
+        if (!location.isBlank()) {
+            out.append(" in ").append(location);
+        }
+        out.append(" and thought your team might be a fit for Arma Automotive's CNC tube notcher.\n\n");
+        if (!whyFit.isBlank()) {
+            out.append("From what I found, ").append(whyFit).append(' ').append('\n').append('\n');
+        }
+        if (!evidence.isBlank()) {
+            out.append("The public signals that stood out were: ").append(evidence).append('\n').append('\n');
+        }
+        out.append("We built the CNC tube notcher for shops that need repeatable tube notching workflows with less manual setup and more consistent fit-up, especially for chassis, cages, and other tubular fabrication work.\n\n");
+        out.append("If it would be useful, I can send a short overview of how shops are using it and whether it looks relevant for your workflow.\n\n");
+        out.append("Best,\n");
+        out.append("Arma Automotive\n");
+        return out.toString().trim() + "\n";
+    }
+
+    private String slugify(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String lower = value.trim().toLowerCase();
+        StringBuilder out = new StringBuilder(lower.length());
+        boolean lastWasDash = false;
+        for (int i = 0; i < lower.length(); i++) {
+            char c = lower.charAt(i);
+            if (Character.isLetterOrDigit(c)) {
+                out.append(c);
+                lastWasDash = false;
+            } else if (!lastWasDash) {
+                out.append('-');
+                lastWasDash = true;
+            }
+        }
+        String slug = out.toString();
+        while (slug.startsWith("-")) {
+            slug = slug.substring(1);
+        }
+        while (slug.endsWith("-")) {
+            slug = slug.substring(0, slug.length() - 1);
+        }
+        return slug;
+    }
+
+    private String valueOrDefault(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value.trim();
     }
 
     private static List<ProspectRecord> filterNewRecords(List<ProspectRecord> records, Set<String> existingKeys) {

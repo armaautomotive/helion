@@ -8,11 +8,14 @@ public record ProspectSearchQueueItem(
         String region,
         String city,
         String industry,
+        int priority,
         int pass,
         String status,
         LocalDateTime lastRun,
         LocalDateTime nextRun,
-        int resultsSeen,
+        int attempts,
+        int prospectsSaved,
+        LocalDateTime lastSuccess,
         String notes) {
 
     public String effectiveQuery() {
@@ -32,7 +35,7 @@ public record ProspectSearchQueueItem(
         return query.toString().trim();
     }
 
-    public ProspectSearchQueueItem afterRun(int newResultsSeen, int delaySeconds) {
+    public ProspectSearchQueueItem afterRun(int newProspectsSaved, int delaySeconds) {
         int currentPass = Math.max(1, pass);
         int nextPass = currentPass >= 4 ? 1 : currentPass + 1;
         LocalDateTime now = LocalDateTime.now();
@@ -44,12 +47,22 @@ public record ProspectSearchQueueItem(
                 region,
                 city,
                 industry,
+                priority,
                 nextPass,
                 nextStatus,
                 now,
                 nextDate,
-                Math.max(0, newResultsSeen),
+                Math.max(0, attempts + 1),
+                Math.max(0, newProspectsSaved),
+                newProspectsSaved > prospectsSaved ? now : lastSuccess,
                 notes);
+    }
+
+    public double successRate() {
+        if (attempts <= 0) {
+            return 0.0;
+        }
+        return prospectsSaved / (double) attempts;
     }
 
     public boolean isDue(LocalDateTime now) {
@@ -66,16 +79,26 @@ public record ProspectSearchQueueItem(
                 csv(region),
                 csv(city),
                 csv(industry),
+                csv(Integer.toString(priority)),
                 csv(Integer.toString(pass)),
                 csv(status),
                 csv(formatDateTime(lastRun)),
                 csv(formatDateTime(nextRun)),
-                csv(Integer.toString(resultsSeen)),
+                csv(Integer.toString(attempts)),
+                csv(Integer.toString(prospectsSaved)),
+                csv(formatDateTime(lastSuccess)),
                 csv(notes));
     }
 
     public String summaryLine() {
-        return id + ". [" + status + "] pass " + pass + " next " + (nextRun == null ? "(now)" : nextRun) + " | " + effectiveQuery();
+        return id
+                + ". [p" + priority + " " + status + "] pass " + pass
+                + " next " + (nextRun == null ? "(now)" : nextRun)
+                + " | attempts " + attempts
+                + " | saved " + prospectsSaved
+                + " | success " + Math.round(successRate() * 100) + "%"
+                + " | last success " + (lastSuccess == null ? "(none)" : lastSuccess)
+                + " | " + effectiveQuery();
     }
 
     private static void append(StringBuilder builder, String value) {

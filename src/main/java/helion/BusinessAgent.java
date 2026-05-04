@@ -4,8 +4,11 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 public final class BusinessAgent {
     private final LlmProvider manager;
@@ -17,6 +20,8 @@ public final class BusinessAgent {
     private final AgentRegistry agentRegistry;
     private final UsageTracker usageTracker;
     private final AgentDistiller distiller;
+    private final AgentDistillStateStore distillStateStore;
+    private final DistillSourceMonitor distillSourceMonitor;
     private final MemoryStore memoryStore;
     private final EmailDraftStore emailDraftStore;
     private final EmailInboxStore emailInboxStore;
@@ -36,6 +41,8 @@ public final class BusinessAgent {
         this.agentRegistry = agentRegistry;
         this.usageTracker = usageTracker;
         this.distiller = new AgentDistiller(manager, knowledgeBase, companyDataCorpus);
+        this.distillStateStore = new AgentDistillStateStore();
+        this.distillSourceMonitor = new DistillSourceMonitor(config, companyDataSources);
         this.memoryStore = memoryStore;
         this.emailDraftStore = emailDraftStore;
         this.emailInboxStore = new EmailInboxStore(config.emailSettings(), agentRegistry);
@@ -213,8 +220,8 @@ public final class BusinessAgent {
         return prompt.toString().trim();
     }
 
-    private String buildProspectingSystemPrompt(int count) {
-        return """
+    private String buildProspectingSystemPrompt(int count, boolean compactLocalMode) {
+        String base = """
                 You are Helion running a prospect collection workflow for the prospecting agent.
                 Your job is to find plausible buyer companies and, when supported by public evidence, likely customer contacts.
 
@@ -278,6 +285,17 @@ public final class BusinessAgent {
                 - Prioritize quality over quantity.
                 - Do not include commentary outside action blocks.
                 """.formatted(Math.max(1, count));
+        if (!compactLocalMode) {
+            return base;
+        }
+        return base + """
+
+                Local execution notes:
+                - Keep the workflow narrow and grounded.
+                - Prefer SEARCH and FETCH before WORKER unless search repeatedly returns nothing.
+                - Prefer one specific company or page at a time.
+                - Avoid speculative prospect lists without fetched evidence.
+                """;
     }
 
     private String buildProspectingUserPrompt(String searchFocus, int count, List<ToolObservation> observations, int turn) {
@@ -438,8 +456,16 @@ public final class BusinessAgent {
         return new ToolObservation("knowledge", "business-context", knowledgeBase.loadContext());
     }
 
+    private ToolObservation loadKnowledgeContextCompact() throws IOException {
+        return new ToolObservation("knowledge", "business-context", TextUtils.limit(knowledgeBase.loadContext(), 3500));
+    }
+
     private ToolObservation loadCompanyDataContext() throws IOException {
         return new ToolObservation("company_data", "shared-documents", companyDataCorpus.loadContext());
+    }
+
+    private ToolObservation loadCompanyDataContextCompact() throws IOException {
+        return new ToolObservation("company_data", "shared-documents", TextUtils.limit(companyDataCorpus.loadContext(), 2500));
     }
 
     private ToolObservation loadAgentContext(String agentId) throws IOException {
@@ -464,6 +490,31 @@ public final class BusinessAgent {
         }
         out.append("Distilled context:\n").append(distilled).append('\n').append('\n');
         out.append("Workspace context:\n").append(workspace);
+        return new ToolObservation("agent", profile.id(), out.toString().trim());
+    }
+
+    private ToolObservation loadAgentContextCompact(String agentId) throws IOException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return new ToolObservation("agent", "selection", "No specific agent selected.");
+        }
+
+        String role = TextUtils.limit(readIfExists(profile.roleFile()), 1800);
+        AgentStatus status = AgentStatus.parse(readIfExists(profile.statusFile()), config);
+        String distilled = new DirectoryCorpus(true, profile.distilledDir(), 3500, 2).loadContext();
+        String workspace = new DirectoryCorpus(true, profile.workspaceDir(), 2000, 2).loadContext();
+        String primaryOutput = TextUtils.limit(loadPrimaryOutput(profile, status), 1800);
+
+        StringBuilder out = new StringBuilder();
+        out.append("Agent ID: ").append(profile.id()).append('\n');
+        out.append("Role summary:\n").append(role.isBlank() ? "No role.md content." : role).append('\n').append('\n');
+        out.append("Status:\n").append(status.renderedStatus()).append('\n').append('\n');
+        if (!status.primaryOutputFile().isBlank()) {
+            out.append("Primary output file: ").append(status.primaryOutputFile()).append('\n');
+            out.append("Primary output preview:\n").append(primaryOutput.isBlank() ? "(empty)" : primaryOutput).append('\n').append('\n');
+        }
+        out.append("Distilled context:\n").append(distilled).append('\n').append('\n');
+        out.append("Workspace summary:\n").append(workspace);
         return new ToolObservation("agent", profile.id(), out.toString().trim());
     }
 
@@ -651,7 +702,10 @@ public final class BusinessAgent {
             return "Unknown agent: " + agentId;
         }
         AgentActivityStore activityStore = new AgentActivityStore();
-        LlmProvider autonomousProvider = autonomousProvider(executionTarget, preferredLocalPool(agentId));
+        String preferredLocalPool = preferredLocalPool(agentId);
+        LlmProvider autonomousProvider = autonomousProvider(executionTarget, preferredLocalPool);
+        boolean compactLocalMode = "local".equalsIgnoreCase(executionTarget);
+        String searchStrategy = prospectingSearchStrategy(agentId, executionTarget);
         if ("demo".equals(autonomousProvider.name())) {
             logAgentActivity(activityStore, profile, "info", "prospecting", "Demo mode prospecting run", "Search focus: " + searchFocus);
             List<ProspectRecord> demoRecords = List.of(
@@ -681,33 +735,62 @@ public final class BusinessAgent {
         }
 
         AgentRequest request = new AgentRequest(AgentMode.ANALYZE, searchFocus, agentId);
-        List<ToolObservation> observations = new ArrayList<>();
-        observations.add(loadAgentContext(agentId));
-        observations.add(loadKnowledgeContext());
-        observations.add(loadCompanyDataContext());
-        observations.add(loadAutomaticMemoryContext(request));
+        List<ToolObservation> observations = buildProspectingObservations(agentId, request, compactLocalMode);
         boolean hasGroundedWebEvidence = false;
+        BrowserSearchResult lastSearchResult = null;
+        Set<String> fetchedUrls = new HashSet<>();
         logAgentActivity(
                 activityStore,
                 profile,
                 "info",
                 "prospecting",
                 "Started prospecting workflow",
-                "Search focus: " + searchFocus + "\nExecution target: " + executionTarget + "\nRequested prospect count: " + count);
+                "Search focus: " + searchFocus + "\nExecution target: " + executionTarget + "\nRequested prospect count: " + count
+                        + "\nPreferred local pool: " + nonBlank(preferredLocalPool)
+                        + "\nCompact local mode: " + compactLocalMode
+                        + "\nSearch strategy: " + searchStrategy);
         for (int turn = 1; turn <= config.maxTurns(); turn++) {
-            String systemPrompt = buildProspectingSystemPrompt(count);
+            String systemPrompt = buildProspectingSystemPrompt(count, compactLocalMode);
             String userPrompt = buildProspectingUserPrompt(searchFocus, count, observations, turn);
+            if (turn == 1 || compactLocalMode) {
+                logProspectingDiagnostics(
+                        activityStore,
+                        profile,
+                        autonomousProvider,
+                        executionTarget,
+                        preferredLocalPool,
+                        turn,
+                        observationChars(observations),
+                        systemPrompt.length(),
+                        userPrompt.length(),
+                        compactLocalMode,
+                        searchStrategy);
+            }
             ManagerAction action;
-            try {
-                action = ManagerActionParser.parse(autonomousProvider.complete(systemPrompt, userPrompt));
-            } catch (IOException ex) {
-                        logProspectingFailure(
-                                activityStore,
-                                profile,
-                                "llm",
-                                "Coordinator request failed",
-                                "Turn: " + turn + "\nProvider: " + autonomousProvider.name() + "\nError: " + nonBlank(ex.getMessage()));
-                        throw ex;
+            ManagerAction guidedAction = guidedProspectingAction(searchStrategy, searchFocus, turn, lastSearchResult, fetchedUrls, hasGroundedWebEvidence);
+            if (guidedAction != null) {
+                action = guidedAction;
+            } else {
+                try {
+                    action = ManagerActionParser.parse(autonomousProvider.complete(systemPrompt, userPrompt));
+                } catch (IOException ex) {
+                            logProspectingFailure(
+                                    activityStore,
+                                    profile,
+                                    "llm",
+                                    "Coordinator request failed",
+                                    "Turn: " + turn
+                                            + "\nProvider: " + autonomousProvider.name()
+                                            + "\nModel: " + autonomousProvider.modelName()
+                                            + "\nPreferred local pool: " + nonBlank(preferredLocalPool)
+                                            + "\nCompact local mode: " + compactLocalMode
+                                            + "\nSearch strategy: " + searchStrategy
+                                            + "\nObservation chars: " + observationChars(observations)
+                                            + "\nSystem prompt chars: " + systemPrompt.length()
+                                            + "\nUser prompt chars: " + userPrompt.length()
+                                            + "\nError: " + nonBlank(ex.getMessage()));
+                            throw ex;
+                }
             }
             logAgentActivity(
                     activityStore,
@@ -798,6 +881,7 @@ public final class BusinessAgent {
                         throw ex;
                     }
                     observations.add(new ToolObservation("search", searchAction.query(), result.render()));
+                    lastSearchResult = result;
                     if (!result.items().isEmpty()) {
                         hasGroundedWebEvidence = true;
                     }
@@ -823,6 +907,7 @@ public final class BusinessAgent {
                         throw ex;
                     }
                     observations.add(new ToolObservation("fetch", fetchAction.url(), page.render()));
+                    fetchedUrls.add(fetchAction.url());
                     if (!page.content().isBlank()) {
                         hasGroundedWebEvidence = true;
                     }
@@ -956,7 +1041,7 @@ public final class BusinessAgent {
             }
             String result = collectProspects(agentId, item.effectiveQuery(), count, executionTarget);
             int resultsSeen = extractSavedCount(result);
-            ProspectSearchQueueItem updated = item.afterRun(item.resultsSeen() + resultsSeen, delaySeconds);
+            ProspectSearchQueueItem updated = item.afterRun(item.prospectsSaved() + resultsSeen, delaySeconds);
             prospectSearchQueueStore.markRun(agentId, updated);
             out.append("Queue item ").append(item.id()).append(":\n");
             out.append(result).append('\n');
@@ -978,7 +1063,7 @@ public final class BusinessAgent {
         }
         String result = collectProspects(agentId, item.effectiveQuery(), count, executionTarget);
         int resultsSeen = extractSavedCount(result);
-        ProspectSearchQueueItem updated = item.afterRun(item.resultsSeen() + resultsSeen, queueDelaySeconds(agentId));
+        ProspectSearchQueueItem updated = item.afterRun(item.prospectsSaved() + resultsSeen, queueDelaySeconds(agentId));
         prospectSearchQueueStore.markRun(agentId, updated);
         return result + "\nQueue item advanced: " + item.summaryLine() + " -> pass " + updated.pass();
     }
@@ -989,6 +1074,14 @@ public final class BusinessAgent {
 
     public String prospectQueueReport(String agentId) throws IOException {
         return prospectSearchQueueStore.renderList(agentId);
+    }
+
+    public String seedProspectQueueFromCities(String agentId) throws IOException {
+        return prospectSearchQueueStore.seedFromCities(agentId);
+    }
+
+    public String rebuildProspectQueueFromCities(String agentId) throws IOException {
+        return prospectSearchQueueStore.rebuildFromCities(agentId);
     }
 
     public String collectSocialOpportunities(String agentId, String searchFocus, int count, String executionTarget) throws IOException, InterruptedException {
@@ -1224,6 +1317,14 @@ public final class BusinessAgent {
         return readAgentStatus(agentId).preferredLocalPool();
     }
 
+    private String prospectingSearchStrategy(String agentId, String executionTarget) throws IOException {
+        String configured = readAgentStatus(agentId).prospectingSearchStrategy();
+        if ("guided".equals(configured) || "llm".equals(configured)) {
+            return configured;
+        }
+        return "local".equalsIgnoreCase(executionTarget) ? "guided" : "llm";
+    }
+
     private AgentStatus readAgentStatus(String agentId) throws IOException {
         if (agentId == null || agentId.isBlank()) {
             return AgentStatus.parse("", config);
@@ -1233,6 +1334,66 @@ public final class BusinessAgent {
             return AgentStatus.parse("", config);
         }
         return AgentStatus.parse(readIfExists(profile.statusFile()), config);
+    }
+
+    private ManagerAction guidedProspectingAction(
+            String searchStrategy,
+            String searchFocus,
+            int turn,
+            BrowserSearchResult lastSearchResult,
+            Set<String> fetchedUrls,
+            boolean hasGroundedWebEvidence) {
+        if (!"guided".equals(searchStrategy)) {
+            return null;
+        }
+        if (turn == 1) {
+            return new SearchAction(primaryGuidedQuery(searchFocus), 5);
+        }
+        if (lastSearchResult != null) {
+            for (SearchResultItem item : lastSearchResult.items()) {
+                if (item == null || item.url() == null || item.url().isBlank()) {
+                    continue;
+                }
+                if (!fetchedUrls.contains(item.url())) {
+                    return new FetchAction(item.url());
+                }
+            }
+        }
+        if (turn == 2) {
+            return new SearchAction(secondaryGuidedQuery(searchFocus), 5);
+        }
+        if (turn == 3 && !hasGroundedWebEvidence) {
+            return new SearchAction(tertiaryGuidedQuery(searchFocus), 5);
+        }
+        return null;
+    }
+
+    private String primaryGuidedQuery(String searchFocus) {
+        return cleanedGuidedQuery(searchFocus);
+    }
+
+    private String secondaryGuidedQuery(String searchFocus) {
+        String query = cleanedGuidedQuery(searchFocus);
+        if (!query.toLowerCase().contains("fabrication")) {
+            query = query + " fabrication shop";
+        }
+        return query;
+    }
+
+    private String tertiaryGuidedQuery(String searchFocus) {
+        String query = cleanedGuidedQuery(searchFocus);
+        if (!query.toLowerCase().contains("contact")) {
+            query = query + " contact";
+        }
+        return query;
+    }
+
+    private String cleanedGuidedQuery(String searchFocus) {
+        String query = searchFocus == null ? "" : searchFocus.trim();
+        query = query.replace("site:google.com OR site:bing.com OR site:yellowpages.ca", "");
+        query = query.replace("OR", " ");
+        query = query.replaceAll("\\s+", " ").trim();
+        return query;
     }
 
     private int queueDelaySeconds(String agentId) throws IOException {
@@ -1256,6 +1417,47 @@ public final class BusinessAgent {
         return usageTracker.renderText();
     }
 
+    public String refreshDistilledContextIfNeeded(String agentId) throws IOException, InterruptedException {
+        AgentProfile profile = agentRegistry.load(agentId);
+        if (profile == null) {
+            return "Unknown agent: " + agentId;
+        }
+        AgentStatus status = readAgentStatus(agentId);
+        AgentDistillState state = distillStateStore.read(profile);
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime lastCheckedAt = state.lastCheckedAt();
+        if (lastCheckedAt != null && lastCheckedAt.plusSeconds(Math.max(300, config.distillCheckSeconds())).isAfter(now)) {
+            return "";
+        }
+
+        LocalDateTime latestSourceModifiedAt = distillSourceMonitor.latestModifiedAt(profile);
+        AgentDistillState checkedState = new AgentDistillState(
+                now,
+                state.lastDistilledAt(),
+                latestSourceModifiedAt,
+                state.providerName(),
+                state.providerModel());
+        distillStateStore.write(profile, checkedState);
+
+        if (latestSourceModifiedAt == null) {
+            return "";
+        }
+        if (state.lastDistilledAt() != null && !latestSourceModifiedAt.isAfter(state.lastDistilledAt())) {
+            return "";
+        }
+
+        LlmProvider provider = autonomousProvider(status.executionTarget(), status.preferredLocalPool());
+        List<DistilledFile> files = distiller.distill(profile, provider);
+        distiller.writeFiles(profile, files);
+        distillStateStore.write(profile, new AgentDistillState(
+                now,
+                now,
+                latestSourceModifiedAt,
+                provider.name(),
+                provider.modelName()));
+        return "Distilled " + files.size() + " files using " + provider.name() + ":" + provider.modelName();
+    }
+
     public String distillAgent(String agentId) throws IOException, InterruptedException {
         return withUsageAgent(agentId, () -> distillAgentInternal(agentId));
     }
@@ -1265,8 +1467,18 @@ public final class BusinessAgent {
         if (profile == null) {
             return "Unknown agent: " + agentId;
         }
-        List<DistilledFile> files = distiller.distill(profile);
+        AgentStatus status = readAgentStatus(agentId);
+        LlmProvider provider = autonomousProvider(status.executionTarget(), status.preferredLocalPool());
+        List<DistilledFile> files = distiller.distill(profile, provider);
         distiller.writeFiles(profile, files);
+        LocalDateTime latestSourceModifiedAt = distillSourceMonitor.latestModifiedAt(profile);
+        LocalDateTime now = LocalDateTime.now();
+        distillStateStore.write(profile, new AgentDistillState(
+                now,
+                now,
+                latestSourceModifiedAt,
+                provider.name(),
+                provider.modelName()));
 
         StringBuilder out = new StringBuilder();
         out.append("Distillation complete for agent ").append(profile.id()).append('\n');
@@ -1462,6 +1674,56 @@ public final class BusinessAgent {
     private String renderSimpleFinal(String status, String title, String summary, String details, List<String> nextSteps, List<String> sources, boolean styledOutput) {
         FinalResponse response = new FinalResponse(status, title, summary, details, nextSteps, sources);
         return styledOutput ? response.render() : response.renderPlain();
+    }
+
+    private List<ToolObservation> buildProspectingObservations(String agentId, AgentRequest request, boolean compactLocalMode) throws IOException {
+        List<ToolObservation> observations = new ArrayList<>();
+        observations.add(compactLocalMode ? loadAgentContextCompact(agentId) : loadAgentContext(agentId));
+        observations.add(compactLocalMode ? loadKnowledgeContextCompact() : loadKnowledgeContext());
+        observations.add(compactLocalMode ? loadCompanyDataContextCompact() : loadCompanyDataContext());
+        observations.add(loadAutomaticMemoryContext(request));
+        return observations;
+    }
+
+    private int observationChars(List<ToolObservation> observations) {
+        int total = 0;
+        for (ToolObservation observation : observations) {
+            if (observation == null) {
+                continue;
+            }
+            total += observation.render().length();
+        }
+        return total;
+    }
+
+    private void logProspectingDiagnostics(
+            AgentActivityStore activityStore,
+            AgentProfile profile,
+            LlmProvider provider,
+            String executionTarget,
+            String preferredLocalPool,
+            int turn,
+            int observationChars,
+            int systemPromptChars,
+            int userPromptChars,
+            boolean compactLocalMode,
+            String searchStrategy) {
+        logAgentActivity(
+                activityStore,
+                profile,
+                "info",
+                "prospecting-diagnostics",
+                "Coordinator diagnostics",
+                "Turn: " + turn
+                        + "\nExecution target: " + executionTarget
+                        + "\nProvider: " + provider.name()
+                        + "\nModel: " + provider.modelName()
+                        + "\nPreferred local pool: " + nonBlank(preferredLocalPool)
+                        + "\nSearch strategy: " + searchStrategy
+                        + "\nCompact local mode: " + compactLocalMode
+                        + "\nObservation chars: " + observationChars
+                        + "\nSystem prompt chars: " + systemPromptChars
+                        + "\nUser prompt chars: " + userPromptChars);
     }
 
     private void logAgentActivity(AgentActivityStore store, AgentProfile profile, String level, String task, String summary, String details) {
